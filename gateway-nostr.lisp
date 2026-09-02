@@ -343,12 +343,18 @@ silently drop CODE.)"
 ;; desktop at all, until somebody reaches a shell.  A feature nobody has used yet does not get
 ;; to take the desktop down with it.
 ;;
+;; THE PATH IS ASDF-RELATIVE, NOT *LOAD-PATHNAME*-RELATIVE.  These two stay LOADs rather
+;; than components on purpose -- the handler-case below is the whole point, and a component
+;; that fails to compile fails the system.  But (merge-pathnames X *load-pathname*) resolves
+;; against the OUTPUT CACHE under compile-file, so once this repo became an ASDF system both
+;; loads failed EVERY time and took the degraded path silently: the phone got no payload
+;; channel and no warp panel, with one "@@ ... unavailable" line as the only sign.
 ;; The fallbacks keep the four names the session dispatch calls, and keep stream 102 CLAIMED.
 ;; Dropping a frame the phone sends is correct; letting 102 fall through to the RFB branch would
 ;; hand glass a JSON blob as desktop input (0x7B is not an RFB message type).  The literal 102 is
 ;; deliberate — +WARP-STREAM-ID+ is exactly what we may not have.
 (handler-case
-    (load (merge-pathnames "warp-channel.lisp" (or *load-pathname* *default-pathname-defaults*)))
+    (load (asdf:system-relative-pathname "glass-webrtc" "warp-channel.lisp"))
   (error (e)
     (format *error-output* "~&@@ warp: channel unavailable (~a) — serving without it~%" e)
     (finish-output *error-output*)
@@ -371,7 +377,7 @@ silently drop CODE.)"
 ;; INERT unless PAYLOAD_CHANNEL is set: no file is read, no thread is started, and a phone that asks
 ;; is answered `none` so it can say so and offer Retry.  See payload-channel.lisp.
 (handler-case
-    (load (merge-pathnames "payload-channel.lisp" (or *load-pathname* *default-pathname-defaults*)))
+    (load (asdf:system-relative-pathname "glass-webrtc" "payload-channel.lisp"))
   (error (e)
     (format *error-output* "~&@@ payload: channel unavailable (~a) — serving without it~%" e)
     (finish-output *error-output*)

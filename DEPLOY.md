@@ -47,7 +47,46 @@ index-nostr.html ──extract──▶ entry.mjs ──esbuild──▶ bundle.
                                                                 └─▶ https://<site-npub>.nsite.lol/
 ```
 
+## Building the payload client that kiln serves
+
+`kiln` does not serve this repo's `payload.js`. **That file is SOURCE** — its first
+import is
+
+```js
+import RFB from './novnc/core/rfb.js';
+```
+
+which resolves when a web server has `novnc/` sitting beside it, and cannot resolve
+when the client is *injected down data channel 104*, because there is no directory
+and no base URL. A browser handed the source fails with
+
+```
+View only — The desktop client failed to start
+Module name, './novnc/core/rfb.js' does not resolve to a valid URL.
+```
+
+`mksplit.py` is what produces the servable file: one self-contained bundle with
+noVNC and nostr-tools inlined, roughly twice the size of the source and containing
+no `./novnc/` import at all. That is the difference to check for, and it is what
+`kiln local` now checks at boot before it advertises the channel.
+
+```sh
+export NSITE_BUILD=/path/to/nsite-build   # node_modules + generated artefacts
+python3 mksplit.py
+cp "$NSITE_BUILD"/payload.js "$HOME"/.kiln/payload.js      # where kiln looks first
+```
+
+`kiln`'s boot probes `$KILN_ETC/payload.js` (`~/.kiln` for `kiln local`) **before**
+the repo copy, so the built artefact wins and the repo copy is only ever a fallback
+— a fallback that cannot work in a browser, which is why the boot now says so
+loudly instead of letting the phone discover it.
+
+**Do not delete `~/.kiln/payload.js` as stale.** It is a build artefact with no
+generator in the repo tree, it is bigger than the source it comes from, and nothing
+regenerates it automatically. Rebuild it with the recipe above.
+
 ## Build
+
 
 ```sh
 export NSITE_BUILD=/path/to/nsite-build   # node_modules + generated artefacts
