@@ -23,9 +23,12 @@
   ;; it starts nothing, subscribes to nothing, and listens on nothing.
   (asdf:load-system "glass/nostr")
   (asdf:load-system "cl-nostr"))
-(load (merge-pathnames "glass-capture.lisp" (or *load-pathname* *default-pathname-defaults*)))
-;; the video profiles + the control channel that switches between them mid-session
-(load (merge-pathnames "video-profiles.lisp" (or *load-pathname* *default-pathname-defaults*)))
+;; glass-capture (the VP8 video path) and video-profiles are ASDF COMPONENTS, not
+;; hand-loaded siblings.  They used to be (load (merge-pathnames ... *load-pathname*)),
+;; which works when this file is LOADed as source and breaks the moment it is
+;; COMPILE-FILEd: under ASDF *load-pathname* is the output cache, so the sibling is
+;; looked for in .cache/... and is not there.  video-profiles is already a component of
+;; the parent "glass-webrtc" system; glass-capture is now one of this system's.
 
 (in-package #:webrtc-data)
 

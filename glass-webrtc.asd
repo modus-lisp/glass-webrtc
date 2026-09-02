@@ -32,4 +32,5 @@ machine's home directory."
 of a POST, so a browser reaches the desktop without a reachable address."
   :depends-on ("glass-webrtc" "glass/nostr" "cl-nostr")
   :serial t
-  :components ((:file "gateway-nostr")))
+  :components ((:file "glass-capture")
+               (:file "gateway-nostr")))
