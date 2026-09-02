@@ -24,8 +24,18 @@
 
 (in-package #:webrtc-data)
 
-(defparameter *dir* (uiop:pathname-directory-pathname
-                     (or *load-pathname* *default-pathname-defaults*)))
+(defparameter *dir*
+  ;; WHERE THIS FILE'S ASSETS ARE — novnc/ and index.html sit beside the source.
+  ;;
+  ;; *LOAD-PATHNAME* alone was right while this was only ever LOADed as a script, and
+  ;; wrong the moment it became an ASDF system: compiling through ASDF loads a FASL out
+  ;; of ~/.cache, so the directory of the thing being loaded is the cache, and noVNC
+  ;; would be looked for in there.  Ask ASDF where the system's source is when the
+  ;; system is registered, and fall back to the load path for a plain script load,
+  ;; which is still how kiln's boot files start it.
+  (or (ignore-errors (asdf:system-source-directory "glass-webrtc"))
+      (uiop:pathname-directory-pathname
+       (or *load-pathname* *default-pathname-defaults*))))
 ;; noVNC: $NOVNC_DIR, else the vendored copy next to this demo (novnc/, includes our TRLE decoder).
 (defparameter *novnc* (truename (or (uiop:getenv "NOVNC_DIR")
                                     (merge-pathnames "novnc/" *dir*))))
@@ -161,16 +171,39 @@
                                             ((floatp v) (format nil "~,2f" v)) (t v)))))
       "{}"))
 
-(setf hunchentoot:*dispatch-table*
-      (list (hunchentoot:create-folder-dispatcher-and-handler "/novnc/" *novnc*)
-            (hunchentoot:create-regex-dispatcher "^/signal$" #'handle-signal)
-            (hunchentoot:create-regex-dispatcher "^/drop$" #'handle-drop)
-            (hunchentoot:create-regex-dispatcher "^/stats$" #'handle-stats)
-            (hunchentoot:create-regex-dispatcher "^/$" #'handle-index)))
+(defvar *acceptor* nil "The running hunchentoot acceptor, or NIL.")
 
-(defvar *acceptor*
-  (hunchentoot:start (make-instance 'hunchentoot:easy-acceptor :port *port* :address "0.0.0.0")))
-(format t "~&@@ gateway on http://0.0.0.0:~a  (glass ~a, noVNC ~a)~%"
-        *port* (glass:endpoint-string :host *glass-host* :port *glass-port*) *novnc*)
-(finish-output)
-(loop (sleep 5))
+(defun start-gateway (&key (port *port*) (address "0.0.0.0") (park t))
+  "Install the routes, start the server, and (unless PARK is NIL) never return.
+
+   SEPARATED FROM LOADING, which is what lets this file be part of a system rather
+   than only a script.  It used to be four top-level forms: set the dispatch table,
+   START the acceptor, print a banner, and (LOOP (SLEEP 5)).  Loading the file was
+   therefore the same act as running the gateway — so an ASDF component of it would
+   bind a port as a side effect of COMPILE-OP, and then never return from
+   LOAD-SYSTEM.  Nothing could depend on this code without also starting it.
+
+   PARK is what kiln's boot files want: they load this and expect it to hold the
+   process open.  A caller that has its own event loop passes :PARK NIL and gets the
+   acceptor back."
+  (setf hunchentoot:*dispatch-table*
+        (list (hunchentoot:create-folder-dispatcher-and-handler "/novnc/" *novnc*)
+              (hunchentoot:create-regex-dispatcher "^/signal$" #'handle-signal)
+              (hunchentoot:create-regex-dispatcher "^/drop$" #'handle-drop)
+              (hunchentoot:create-regex-dispatcher "^/stats$" #'handle-stats)
+              (hunchentoot:create-regex-dispatcher "^/$" #'handle-index)))
+  (setf *acceptor*
+        (hunchentoot:start (make-instance 'hunchentoot:easy-acceptor
+                                          :port port :address address)))
+  (format t "~&@@ gateway on http://~a:~a  (glass ~a, noVNC ~a)~%"
+          address port (glass:endpoint-string :host *glass-host* :port *glass-port*) *novnc*)
+  (finish-output)
+  (when park (loop (sleep 5)))
+  *acceptor*)
+
+(defun stop-gateway ()
+  "Stop the acceptor if one is running.  There was no way to do this before."
+  (when *acceptor*
+    (ignore-errors (hunchentoot:stop *acceptor*))
+    (setf *acceptor* nil)
+    t))
