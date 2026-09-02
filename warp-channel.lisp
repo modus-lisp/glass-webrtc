@@ -297,14 +297,14 @@ against today's warp — which is the definition of a broken panel.")
 (defun warp-enrolments ()
   "The current result-set: enrolled terminals that have not lapsed, as domain objects."
   (multiple-value-bind (rows why)
-      (glass:admission-records :host *glass-host* :port *admission-port*)
+      (glass:admission-records :host *admission-host* :port *admission-port*)
     (cond
       ((eq why :unreachable)
        (unless *warp-query-complained*
          (setf *warp-query-complained* t)
          (format *error-output* "~&[warp] the desktop's admission service (~a:~a) is not answering~
                                  ~% — the terminal list is empty because it cannot be asked~%"
-                 *glass-host* *admission-port*)
+                 *admission-host* *admission-port*)
          (finish-output *error-output*))
        '())
       (t
@@ -342,7 +342,7 @@ computed for a different one.
 
 So an enrolled guest is never offered `revoke`, and rule 6 refuses it at invocation if it asks
 anyway.  Menu filtering is courtesy; INVOKE is the enforcement point, in warp, once."
-  (if (glass:admission-allowed-p pubkey :host *glass-host* :port *admission-port*)
+  (if (glass:admission-allowed-p pubkey :host *admission-host* :port *admission-port*)
       :allowlist :device))
 
 ;;; ---- loading, once, lazily ---------------------------------------------------------------
@@ -378,7 +378,7 @@ start, and the systems live in a sibling checkout that a given box may simply no
                   (lambda (pubkey)
                     (glass:admission-revoke (or *warp-invoking-pubkey* "")
                                             pubkey
-                                            :host *glass-host* :port *admission-port*)))
+                                            :host *admission-host* :port *admission-port*)))
             (setf *warp-loaded* t))
         (error (e)
           (format *error-output* "~&[warp] not available: ~a~%" e)
