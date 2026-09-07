@@ -585,6 +585,29 @@ is over-counting route deaths, not under-counting them."
         (and (search "\"away\"" s) t))
     (error () nil)))
 
+(defun control-away-final-p (payload)
+  "T if the client's away hint says it is NOT coming back to this session.
+
+THE CLIENT ALREADY TELLS US WHICH KIND OF DEPARTURE THIS IS and we were throwing it away.
+SENDAWAY carries a reason: `hidden' from visibilitychange, which is a pocketed phone that intends
+to return, and `pagehide' from the unload path, which is a REFRESH, a navigation or a closed tab.
+Those want opposite treatment and had been getting the same.
+
+WHY IT MATTERS MORE SINCE THE GRACE WINDOW: an abandoned session holds its relay allocation until
+its silence limit expires, and *AWAY-GRACE* took that from 30s to 300s.  Superseding covers the
+ordinary refresh -- PROCESS-OFFER retires the previous session for the same pubkey before it
+allocates -- but that is keyed on the phone's pubkey, so a browser that mints a fresh device key
+comes back as a DIFFERENT peer and supersedes nothing.  Then every reload leaves a session sitting
+on a TURN allocation, and the grace window multiplies how long by ten.  A page that has unloaded is
+never coming back to this session, so it gets no grace at all.
+
+Substring-matched for the same reason its sibling is: this runs on the receive thread, and being
+wrong costs a session the long rope rather than anything structural."
+  (handler-case
+      (let ((s (if (stringp payload) payload (map 'string #'code-char (as-u8vec payload)))))
+        (and (search "\"away\"" s) (search "pagehide" s) t))
+    (error () nil)))
+
 (defun session-record (agent &key established-at away err)
   "One session as a plist: the route it used AND how it ended, in the same form.
 
@@ -634,6 +657,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
         ;; terminals overlap, which is the exact class of mistake this whole record exists to fix.
         (established-at nil)                    ; when the data channel opened, or NIL if it never did
         (away nil)                              ; the client's "going away" hint, if it arrived
+        (away-final nil)                        ; ...and whether it said it is not coming back
         (err nil))                              ; the error that ended the session, as a short string
     (unwind-protect
          (handler-case
@@ -717,7 +741,8 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                            *video-max-frame-kb* *video-cleanup-ms*
                            vp8::*backlog-qi* vp8::*backlog-x*)))
                (webrtc-serve-datachannel
-                conn :duration 3600.0 :alive-p (lambda () (peer-alive-p agent :away away))
+                conn :duration 3600.0
+                :alive-p (lambda () (peer-alive-p agent :away (and away (not away-final))))
                 :on-ready
                 (lambda (assoc sid)
                   (setf glass (glass-connect) *last-assoc* assoc)
@@ -768,14 +793,16 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                   ;; a control message would leave a live session still wearing `away' and holding
                   ;; the five-minute rope instead of the thirty-second one.  Cleared BEFORE the
                   ;; dispatch below, so an `away' message re-arms it on the same pass.
-                  (setf away nil)
+                  (setf away nil away-final nil)
                   (cond
                     ((control-sid-p sid)
                      ;; Read the going-away hint off the control stream before handing the message
                      ;; on, so the hint costs one substring search and needs no change to the
                      ;; control protocol's own handler.  Recorded as a TIME, not a flag, so a
                      ;; later "it came back" could be told apart from "it never did".
-                     (when (control-away-p payload) (setf away (get-internal-real-time)))
+                     (when (control-away-p payload)
+                       (setf away (get-internal-real-time)
+                             away-final (control-away-final-p payload)))
                      (handle-control-message assoc sid payload))
                     ;; The phone's THIRD channel (stream 102) is warp: the enrolled-terminal list
                     ;; as a delta stream, and the commands on it.  A negotiated channel has no
