@@ -52,6 +52,9 @@ export async function init(api) {
   const ch       = api.chans.rfb;
   const ctrl     = api.chans.ctrl;
   const warpCh   = api.chans.warp;
+  // Stream 104. The shell used it to hand us this file and has been done with it since;
+  // the file browser sends uploads back up it. See 'putting a file ON the box' below.
+  const payloadCh = api.chans.payload;
   const diag     = api.ui.diag;
   const hud      = api.ui.hud;
   const connEl   = api.ui.connEl;
@@ -252,9 +255,16 @@ export async function init(api) {
       flex-direction:column;background:rgba(8,10,14,.93);border:1px solid rgba(255,255,255,.12);
       border-radius:12px;overflow:hidden;
       font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#dce4ec}
-    #filesHead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+    #filesHead{display:flex;justify-content:flex-start;align-items:baseline;gap:10px;
       padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.1);color:#8a949c;flex:0 0 auto}
     #filesHead b{color:#dce4ec;font-weight:600;letter-spacing:.04em}
+    /* The upload button. Last in the header so it sits hard right, and sized like the stat beside
+       it rather than like a form control -- a phone panel with a grey OS button in it reads as a
+       web page that got in, which is the one thing this client is trying not to look like. */
+    #filesHead #filesUp{margin-left:auto;background:#222c38;color:#dce4ec;border:1px solid
+      rgba(255,255,255,.14);border-radius:6px;padding:2px 10px;font-size:13px;line-height:1.5;
+      cursor:pointer;font-family:inherit}
+    #filesHead #filesUp:active{background:#2c3a4a}
     #filesBody{flex:1 1 auto;position:relative;overflow:hidden}
     #filesRows{display:flex;align-items:stretch;height:100%;overflow-x:auto;overflow-y:hidden;
       -webkit-overflow-scrolling:touch}
@@ -1218,13 +1228,15 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     const filesPanel = document.createElement('div');
     filesPanel.id = 'filesPanel';
     filesPanel.innerHTML =
-      '<div id="filesHead"><b>files</b><span id="filesStat">—</span></div>' +
+      '<div id="filesHead"><b>files</b><span id="filesStat">—</span>' +
+        '<button id="filesUp" title="send a file to this folder">↑</button></div>' +
       '<div id="filesBody"><div id="filesRows"></div><ul id="filesMenu"></ul></div>' +
       '<div id="filesNote"></div>';
     document.body.appendChild(filesPanel);
     const filesStat = filesPanel.querySelector('#filesStat');
     const filesNote = filesPanel.querySelector('#filesNote');
     const filesRowsEl = filesPanel.querySelector('#filesRows');
+    const uploadBtn   = filesPanel.querySelector('#filesUp');
 
     // The slice is per COLUMN here, not per list: the browser says how many rows one column can
     // show and gets that many of every column.  Same report, same units (rows), different shape of
@@ -1283,6 +1295,110 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     };
     richApps.push(filesApp);
     window.addEventListener('resize', () => { if (filesOn) files.viewport(filesFit(), 0); });
+    // ==== putting a file ON the box, over stream 104 ==========================================
+    //
+    // NOT ON THE WARP CHANNEL, and the reason is what warp is.  Stream 102 carries presentation
+    // deltas under a 1024 B/pass budget at 4 Hz, as TEXT — so a file would go base64'd, a third
+    // fatter, a kilobyte per quarter second, through the pipe that is drawing this panel while it
+    // does it.  Stream 104 is already the bulk path (16 KB chunks, its own thread on the box) and
+    // it has been idle since the moment it finished handing us this file.  Bytes go where bytes
+    // already go.
+    //
+    // THE SHELL IS ALSO LISTENING ON 104 AND THAT IS FINE, checked rather than assumed: its handler
+    // parses a string, matches `same`/`none`/`begin` and falls off the end for anything else, so
+    // `upok` and `uperr` reach it and mean nothing to it.  Our BINARY only ever goes up, and the
+    // shell only ever receives, so the two directions never meet.
+    //
+    // WHERE THE FILE GOES IS NOT A QUESTION WE HAVE TO ASK THE BOX.  Every open column is a
+    // container named `col:<path>` (§10.4), so the rightmost one IS the current directory and it is
+    // already in the DOM. Nothing was added to the warp protocol for this: no command, no delta
+    // kind, no round trip. The box re-reads the open columns from disk every pass, so the file
+    // appears in the listing by itself, at 4 Hz, with nothing asked to refresh.
+    const uploadInput = document.createElement('input');
+    uploadInput.type = 'file';
+    uploadInput.multiple = true;
+    uploadInput.style.display = 'none';
+    filesPanel.appendChild(uploadInput);
+
+    // The rightmost open column. Reading the DOM rather than keeping a parallel copy of the
+    // client's container map: the map is warp's, this is one query at click time, and a second
+    // copy is a second thing to be wrong.
+    const uploadDir = () => {
+      const cols = filesRowsEl.querySelectorAll('.container[data-container^="col:"]');
+      const last = cols[cols.length - 1];
+      return last ? last.dataset.container.slice(4) : '';
+    };
+
+    // BACKPRESSURE IS NOT OPTIONAL.  `send` on a data channel buffers without complaint; push a
+    // 40 MB file at it in a tight loop and the buffer grows until the connection dies, taking the
+    // desktop with it. Waiting on bufferedAmount is what makes a large file a slow upload instead
+    // of a dropped session.
+    const UP_HIGH = 1 << 18, UP_CHUNK = 16384;
+    const upDrain = () => new Promise(resolve => {
+      if (payloadCh.bufferedAmount < UP_HIGH) return resolve();
+      const t = setInterval(() => {
+        if (payloadCh.readyState !== 'open' || payloadCh.bufferedAmount < UP_HIGH) {
+          clearInterval(t); resolve();
+        }
+      }, 20);
+    });
+
+    const sendOneFile = async (f, dir) => {
+      if (payloadCh.readyState !== 'open') throw new Error('payload channel is not open');
+      // The opener, then the bytes. The box switches into receive mode on this message and counts
+      // down from `len`, so there is no per-chunk header and no trailer: the transfer ends when the
+      // declared length has arrived. A name with any path in it is reduced to its basename on the
+      // box, so what this panel shows as the destination is the destination.
+      payloadCh.send(JSON.stringify({ t: 'up', name: f.name, dir: dir, len: f.size }));
+      for (let off = 0; off < f.size; off += UP_CHUNK) {
+        await upDrain();
+        if (payloadCh.readyState !== 'open') throw new Error('the connection went away');
+        const slice = f.slice(off, Math.min(f.size, off + UP_CHUNK));
+        payloadCh.send(await slice.arrayBuffer());
+        if (f.size > UP_CHUNK) {
+          filesNote.textContent = 'sending ' + f.name + ' — ' +
+            Math.min(100, Math.round(((off + UP_CHUNK) / f.size) * 100)) + '%';
+        }
+      }
+    };
+
+    let upBusy = false;
+    uploadInput.addEventListener('change', async () => {
+      const dir = uploadDir();
+      const list = Array.from(uploadInput.files || []);
+      uploadInput.value = '';                       // so picking the same file twice fires again
+      if (!list.length) return;
+      if (!dir) { filesNote.textContent = 'open a folder first'; return; }
+      if (upBusy) { filesNote.textContent = 'still sending the last one'; return; }
+      upBusy = true;
+      try {
+        // One at a time: the box holds ONE upload per peer, and an ordered stream means a second
+        // opener sent mid-transfer would be read as file content.
+        for (const f of list) await sendOneFile(f, dir);
+      } catch (err) {
+        filesNote.textContent = 'upload failed: ' + (err && err.message ? err.message : err);
+        diag('upload failed: ' + err);
+      } finally {
+        upBusy = false;
+      }
+    });
+
+    uploadBtn.addEventListener('click', () => {
+      if (!uploadDir()) { filesNote.textContent = 'open a folder first'; return; }
+      uploadInput.click();
+    });
+
+    // The box's answer. A third listener on this channel for the same reason the file browser adds
+    // its own to 102: each feature wires itself, and none of them has to know the others exist.
+    payloadCh.addEventListener('message', e => {
+      if (typeof e.data !== 'string') return;
+      let m = null;
+      try { m = JSON.parse(e.data); } catch (_) { return; }
+      if (!m) return;
+      if (m.t === 'upok')  filesNote.textContent = 'uploaded ' + m.name + ' (' + m.len + ' B)';
+      if (m.t === 'uperr') filesNote.textContent = 'upload failed: ' + (m.why || 'no reason given');
+    });
+
     // ==== END the file browser ================================================================
 
     mountChat({ warpCh, makeWarpClient, warpSend, richApps, micBtn, spkBtn, isOn, diag });
