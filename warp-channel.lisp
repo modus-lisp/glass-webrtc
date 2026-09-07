@@ -213,6 +213,69 @@ one app agreeing about something small.  WARP_FILES_ROOT overrides it."
               (funcall (find-symbol "BROWSE-PROJECTION" "WARP-FILES")
                        (funcall (find-symbol "MAKE-BROWSER" "WARP-FILES")))))))
 
+;;; ---- the operandi chat (client three) — all the fat lives in :operandi-gui/gateway -----------
+;;; The chat, its voice (chord out + stave dictation in), and its phone panel are NOT in this file:
+;;; they are operandi-gui, published at github.com/modus-lisp/operandi-gui.  This box lazy-loads the
+;;; gateway glue and calls FOUR things into it — ENSURE-READY, APP-SPEC, NOTE-PEER, HANDLE-CONTROL.
+;;; Off unless WARP_CHAT is set (it drags in :operandi, an LLM agent that makes outbound calls).
+(defparameter *operandi-gui-enabled* (and (uiop:getenv "WARP_CHAT") t)
+  "Whether this gateway serves the operandi chat at all.  Off unless WARP_CHAT is set.")
+(defvar *operandi-gui-loaded* nil "T, NIL, or :FAILED once the load has been tried.")
+
+;;; The desktop's voice + ear, as :operandi-gui/gateway names them, over THIS box's seat.  This is
+;;; the unix-specific bit, and it lives HERE, in the host, on purpose: the seat is a UNIX socket and
+;;; the voice is glass/stave, both facts about this box.  operandi-gui knows none of it — it asks for
+;;; :SPEAK / :HEARING-TEXT / … and this maps them.  A lisp-machine host replaces these two functions
+;;; with an in-image call and operandi-gui does not change.
+(defun operandi-gui-seat-ctl (form)
+  "Run one Lisp FORM (a string) on the desktop's seat control socket; return the reply line."
+  (ignore-errors
+   (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+     (unwind-protect
+          (progn
+            (sb-bsd-sockets:socket-connect
+             sock (namestring (merge-pathnames ".glass/run/seat-0.control" (user-homedir-pathname))))
+            (let ((s (sb-bsd-sockets:socket-make-stream sock :input t :output t
+                                                             :element-type 'character)))
+              (write-string form s) (terpri s) (finish-output s)
+              (read-line s nil nil)))
+       (ignore-errors (sb-bsd-sockets:socket-close sock))))))
+
+(defun operandi-gui-voice (op &rest args)
+  "The *VOICE* callback operandi-gui/gateway wants: its voice/ear ops, mapped to glass + stave forms
+sent over the seat socket.  :HEARING-TEXT comes back sentence-cased (stave's own recase) and on one
+line (newlines -> spaces, so it survives the socket's read-line)."
+  (ecase op
+    (:speak         (operandi-gui-seat-ctl (format nil "(glass::speak ~s)" (first args))))
+    (:hush          (operandi-gui-seat-ctl "(glass::hush)"))
+    (:speaking-p    (let ((r (operandi-gui-seat-ctl "(glass::speaking-p)")))
+                      (and r (string/= "NIL" (string-trim '(#\Space #\Newline #\Return #\Tab) r)))))
+    (:hearing-clear (operandi-gui-seat-ctl "(glass::hearing-clear)"))
+    (:hearing-start (operandi-gui-seat-ctl "(glass::start-listening)"))
+    (:hearing-stop  (operandi-gui-seat-ctl "(glass::stop-listening)"))
+    (:hearing-text  (operandi-gui-seat-ctl
+                     "(substitute #\\Space #\\Newline (stave:sentence-case (glass::hearing-text)))"))))
+
+(defun operandi-gui-ready ()
+  "Load :operandi-gui/gateway + ENSURE-READY (agent worker, greeting, chord routing) with this box's
+voice link, once.  Returns T on success; never signals — an app that will not load is one this box
+does not serve."
+  (case *operandi-gui-loaded*
+    ((t) t)
+    (:failed nil)
+    (t (handler-case
+           (progn
+             (handler-bind ((warning #'muffle-warning))
+               (let ((*standard-output* (make-broadcast-stream)))
+                 (asdf:load-system "operandi-gui/gateway")))
+             (funcall (find-symbol "ENSURE-READY" "OPERANDI-GUI.GATEWAY") #'operandi-gui-voice)
+             (setf *operandi-gui-loaded* t))
+         (error (e)
+           (setf *operandi-gui-loaded* :failed)
+           (format *error-output* "~&[warp] the operandi chat is not available: ~a~%" e)
+           (finish-output *error-output*)
+           nil)))))
+
 ;;; ---- which apps this box serves ------------------------------------------------------------
 ;;; One function, because the answer depends on what has managed to load and that is only knowable
 ;;; at the moment somebody asks.  NIL is the device manager: the app with no name, the one a client
@@ -233,6 +296,8 @@ panel says nobody answered, which is the honest report."
            ;; DOM-CONSUMER — and OPEN-CHANNEL takes the function that makes one rather than knowing
            ;; about it
            :attach (fdefinition (find-symbol "ATTACH-DOM" "WARP-FILES-DOM"))))
+    ((and (equal id "chat") *operandi-gui-enabled* (operandi-gui-ready))
+     (funcall (find-symbol "APP-SPEC" "OPERANDI-GUI.GATEWAY")))
     (t nil)))
 
 ;;; ---- the query --------------------------------------------------------------------------
@@ -423,6 +488,9 @@ app — in which case the peer's messages for it are dropped and its panel shows
 the honest report of a box that does not have this."
   (let ((spec (handler-case (warp-app app) (error () nil))))
     (when spec
+      (when (and (equal app "chat") (eql *operandi-gui-loaded* t))   ; where dictation/karaoke go
+        (funcall (find-symbol "NOTE-PEER" "OPERANDI-GUI.GATEWAY")
+                 (lambda (frame) (ignore-errors (sctp-send-string assoc sid frame)))))
       (handler-case
           (let* ((invoker (warp-invoker-for pub))
                  (ch (apply (find-symbol "OPEN-CHANNEL" "WARP-DOM")
@@ -485,7 +553,11 @@ the difference between a panel that says nothing and a desktop connection that b
           (let ((text (if (stringp payload) payload (map 'string #'code-char (as-u8vec payload))))
                 ;; who is invoking, for the desktop's own check on the far side of REVOKE-IN-FILE
                 (*warp-invoking-pubkey* pub))
-            (funcall (find-symbol "MUX-RECEIVE" "WARP-DOM") (warp-link-mux link) text)))
+            ;; the chat's free-text input + voice toggles are not warp frames; operandi-gui peels them
+            ;; off before the mux (which speaks warp frames only)
+            (unless (and (eql *operandi-gui-loaded* t)
+                         (funcall (find-symbol "HANDLE-CONTROL" "OPERANDI-GUI.GATEWAY") text))
+              (funcall (find-symbol "MUX-RECEIVE" "WARP-DOM") (warp-link-mux link) text))))
         link)
     (error (e)
       (format *error-output* "~&[warp] message: ~a~%" e)
