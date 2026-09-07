@@ -1,3 +1,4 @@
+import { mountChat } from '/home/claude/operandi-gui/client/chat.js';
 // payload.js — everything that only matters once the connection is up.
 //
 // ===================================================================================================
@@ -289,6 +290,7 @@ export async function init(api) {
     #filesNote{padding:8px 12px;color:#8a949c;flex:0 0 auto;
       border-top:1px solid rgba(255,255,255,.08)}
     /* ==== END the file browser's stylesheet ================================================== */
+    /* operandi chat stylesheet lives in operandi-gui/client/chat.js now (mountChat injects it) */
     /* ==== BEGIN the app menu's stylesheet — lifted by warp/t/two-apps.py ======================
        ONE BUTTON, AND A LIST OF THE RICH APPS BEHIND IT.  The menu is modal on purpose: the
        backdrop sits above every button in the page (including ≡ at 31) so that while the list is
@@ -1282,6 +1284,8 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     richApps.push(filesApp);
     window.addEventListener('resize', () => { if (filesOn) files.viewport(filesFit(), 0); });
     // ==== END the file browser ================================================================
+
+    mountChat({ warpCh, makeWarpClient, warpSend, richApps, micBtn, spkBtn, isOn, diag });
 
     const XK = { Enter:0xff0d, Backspace:0xff08, Tab:0xff09, Escape:0xff1b,
                  ArrowLeft:0xff51, ArrowUp:0xff52, ArrowRight:0xff53, ArrowDown:0xff54,
