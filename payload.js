@@ -266,13 +266,17 @@ export async function init(api) {
       cursor:pointer;font-family:inherit}
     #filesHead #filesUp:active{background:#2c3a4a}
     #filesBody{flex:1 1 auto;position:relative;overflow:hidden}
+    /* pan-x, and the split is the point: the browser keeps the HORIZONTAL axis, which is native
+       column scrolling and should feel native, and the vertical axis comes to the client's own
+       pointer handler because there is nothing here for a browser to scroll -- a column shows the
+       slice the box sent, and reaching row 40 means asking for it (§12), not moving a div. */
     #filesRows{display:flex;align-items:stretch;height:100%;overflow-x:auto;overflow-y:hidden;
-      -webkit-overflow-scrolling:touch}
+      touch-action:pan-x;-webkit-overflow-scrolling:touch}
     #filesRows .container{list-style:none;margin:0;padding:0;flex:0 0 186px;height:100%;
-      overflow-y:auto;-webkit-overflow-scrolling:touch;border-right:1px solid rgba(255,255,255,.09)}
+      overflow-y:hidden;touch-action:pan-x;border-right:1px solid rgba(255,255,255,.09)}
     #filesRows li{display:flex;align-items:baseline;gap:8px;padding:7px 10px;background:#161a20;
       border-bottom:1px solid #0c0e12;border-left:3px solid transparent;
-      touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+      touch-action:pan-x;-webkit-tap-highlight-color:transparent}
     /* the column HEADER is the first row of every container, which is a fact about the projection
        (row 0 is the header) and needs no class from the client to be styled as one */
     #filesRows .container li:first-child{background:#0f1319;color:#8a949c;position:sticky;top:0;
@@ -906,6 +910,29 @@ function makeWarpClient(opts) {
 
   // ---- gestures: recognized HERE, sent as semantics.  Rule 5's vocabulary is closed and this
   // file does not extend it — every browser event below lands on tap / hold / two-finger.
+  //
+  // A DRAG IS NOT A SLOW TAP, and until now this file could not tell the difference.  There was no
+  // pointermove handler at all: `wheel` was the only thing that scrolled, and a phone never fires
+  // one.  So on touch the list could not be panned, and worse, dragging it and letting go SELECTED
+  // whatever was under the finger at release — the hold timer had not expired, so `onUp` read the
+  // release as a tap and opened a folder the user was only trying to scroll past.  Both are the
+  // same omission, and both are fixed by watching the pointer between down and up.
+  //
+  // THE DISCRIMINATION IS DISTANCE, NOT TIME, and it has to be: time already means something here
+  // (400ms is hold), so a drag cannot also be "a long press", and a fast flick is still a drag.
+  // Past DRAG-SLOP pixels the press stops being a press — the hold timer is cancelled and the
+  // release sends nothing.  Under it, nothing changes and a tap is exactly what it was.
+  //
+  // IT PANS IN ROWS, because that is the axis this encoding negotiates (§12) and the unit
+  // `two-finger` is defined in.  Pixels are accumulated and spent one row at a time, so the wire
+  // sees the same gesture the wheel already sent and the server learns no new vocabulary.  A row's
+  // height is measured off a real row rather than assumed, because the two panels using this client
+  // have different ones.
+  //
+  // The name stays `two-finger` even though this is one finger dragging.  Rule 5's enum is closed
+  // and it is closed on MEANING: this is the pan gesture, the encoding decides what pan does, and
+  // adding `drag` as a synonym would be a second word for one idea in a vocabulary whose whole
+  // point is that it is small.
 
   let holdTimer = null, held = null, listeners = null;
 
@@ -914,9 +941,32 @@ function makeWarpClient(opts) {
     return li ? li.dataset.key : null;
   }
 
+  const DRAG_SLOP = 8;                  // px of travel before a press becomes a pan
+
   function attachGestures(root) {
     detachGestures();
+    let downY = 0, downX = 0, lastY = 0, acc = 0, dragging = false, tracking = false;
+
+    // One row, measured.  Falls back to the stylesheet's own 29px when the list is empty, which is
+    // exactly when a pan cannot do anything anyway.
+    const rowPx = () => {
+      const li = rowsEl.querySelector("li[data-key]");
+      return (li && li.offsetHeight) || 29;
+    };
+
+    const step = (dy) => {
+      scroll = Math.max(0, scroll + dy);
+      send({t: "gesture", g: "two-finger", dy: dy});
+    };
+
     const onDown = (ev) => {
+      tracking = true; dragging = false; acc = 0;
+      downX = ev.clientX; downY = ev.clientY; lastY = ev.clientY;
+      // Capture, so a finger that leaves the panel mid-drag keeps panning it instead of silently
+      // handing the gesture to whatever it crossed.
+      if (root.setPointerCapture && ev.pointerId != null) {
+        try { root.setPointerCapture(ev.pointerId); } catch (_) {}
+      }
       held = keyAt(ev);
       if (!held) return;
       // press-hold is a TIMING discrimination and it is timed locally, on purpose: 100-300ms of
@@ -924,7 +974,31 @@ function makeWarpClient(opts) {
       holdTimer = setTimeout(() => { holdTimer = null; send({t: "gesture", g: "hold", key: held}); },
                              400);
     };
-    const onUp = () => {
+
+    const onMove = (ev) => {
+      if (!tracking) return;
+      if (!dragging) {
+        if (Math.abs(ev.clientY - downY) < DRAG_SLOP &&
+            Math.abs(ev.clientX - downX) < DRAG_SLOP) return;
+        dragging = true;
+        // It was never a press.  Cancel the hold, and drop the key so the release cannot tap it.
+        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+        held = null;
+      }
+      // Finger up moves the content up, which is scrolling DOWN — the same sign the wheel sends.
+      acc += lastY - ev.clientY;
+      lastY = ev.clientY;
+      const h = rowPx();
+      while (acc >= h) { acc -= h; step(1); }
+      while (acc <= -h) { acc += h; step(-1); }
+    };
+
+    const onUp = (ev) => {
+      if (root.releasePointerCapture && ev && ev.pointerId != null) {
+        try { root.releasePointerCapture(ev.pointerId); } catch (_) {}
+      }
+      tracking = false;
+      if (dragging) { dragging = false; held = null; return; }   // a pan selects nothing
       if (holdTimer) {
         clearTimeout(holdTimer); holdTimer = null;
         // A release inside the hold window is a tap.  A release AFTER it lands on whatever is under
@@ -934,27 +1008,36 @@ function makeWarpClient(opts) {
       }
       held = null;
     };
+
+    const onCancel = () => {
+      tracking = false; dragging = false;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      held = null;
+    };
+
     const onCtx = (ev) => {                                    // right-click is a hold
       const k = keyAt(ev);
       if (k) { ev.preventDefault(); send({t: "gesture", g: "hold", key: k}); }
     };
     const onWheel = (ev) => {                                  // wheel is the two-finger pan
-      const dy = ev.deltaY > 0 ? 1 : -1;
-      scroll = Math.max(0, scroll + dy);
-      send({t: "gesture", g: "two-finger", dy: dy});
+      step(ev.deltaY > 0 ? 1 : -1);
     };
     root.addEventListener("pointerdown", onDown);
+    root.addEventListener("pointermove", onMove);
     root.addEventListener("pointerup", onUp);
+    root.addEventListener("pointercancel", onCancel);
     root.addEventListener("contextmenu", onCtx);
     root.addEventListener("wheel", onWheel, {passive: true});
-    listeners = {root, onDown, onUp, onCtx, onWheel};
+    listeners = {root, onDown, onMove, onUp, onCancel, onCtx, onWheel};
   }
 
   function detachGestures() {
     if (!listeners) return;
     const l = listeners; listeners = null;
     l.root.removeEventListener("pointerdown", l.onDown);
+    l.root.removeEventListener("pointermove", l.onMove);
     l.root.removeEventListener("pointerup", l.onUp);
+    l.root.removeEventListener("pointercancel", l.onCancel);
     l.root.removeEventListener("contextmenu", l.onCtx);
     l.root.removeEventListener("wheel", l.onWheel);
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }

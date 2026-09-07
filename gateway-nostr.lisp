@@ -414,6 +414,30 @@ silently drop CODE.)"
 (defvar *live-lock* (bt:make-lock))
 (defparameter *peer-silence-limit* 30.0)           ; RFC 7675 consent is 30s; match it
 
+;; ...AND THE SAME NUMBER IS WRONG FOR A PEER THAT SAID GOODBYE.  RFC 7675 is about a peer that has
+;; VANISHED: consent to keep sending expires 30s after it stops answering, so nobody can be tricked
+;; into blasting packets at a third party forever.  That reasoning is exactly right for silence we
+;; cannot explain, and exactly wrong for silence we ASKED FOR: the client sends {"away":1} on the
+;; control channel when the tab is hidden -- a phone locking its screen -- and this process already
+;; parses that hint and files the ending as :AWAY, voluntary, excluded from route health.  It then
+;; tore the session down on the same 30s timer as an unexplained disappearance.
+;;
+;; MEASURED, on this box: sessions ending `AWAY ... silent 30s' after 35, 71, 226 and 348 seconds.
+;; Put the phone down for half a minute and the desktop is gone -- a fresh offer, a fresh answer, a
+;; fresh ICE gather and a fresh TURN allocation to get back to what was already running.
+;;
+;; So an ANNOUNCED departure gets a longer rope than an unexplained one.  It is not a weaker consent
+;; rule, it is a different question: the peer is not unresponsive, it TOLD US it was going and is
+;; expected back.  The cost is bounded and real -- a held TURN allocation for a phone that may never
+;; return -- which is why this is minutes and not unbounded, and why a peer that never said anything
+;; is still judged at 30s.
+(defparameter *away-grace*
+  (or (ignore-errors (float (parse-integer (sb-ext:posix-getenv "GLASS_AWAY_GRACE")) 1.0))
+      300.0)
+  "How long a peer that ANNOUNCED it was going away may stay silent before its session is closed,
+seconds.  Five minutes: long enough to answer a message and come back, short enough that a phone
+that walked out of range is not holding a relay allocation for the afternoon.")
+
 (defun forget-session (pub agent)
   "Drop PUB's registry entry, but only if it is still AGENT — a reconnect may already have replaced it."
   (bt:with-lock-held (*live-lock*)
@@ -430,11 +454,17 @@ ALIVE-P sees the agent stopped and unwinds, which is what releases the TURN allo
       (finish-output)
       (ignore-errors (ice-close (sess-agent old))))))
 
-(defun peer-alive-p (agent)
-  "NIL once the agent is closed or the peer has been silent past the consent limit."
+(defun peer-alive-p (agent &key away)
+  "NIL once the agent is closed or the peer has been silent past the limit that applies to it.
+
+AWAY is the client's own hint that it was going away -- non-NIL means this silence was ANNOUNCED,
+and it is judged against *AWAY-GRACE* instead of *PEER-SILENCE-LIMIT*.  The caller clears it the
+moment anything arrives, so the longer rope covers one announced absence and is not a permanent
+upgrade earned by backgrounding the tab once."
   (and (not (ice-agent-stop agent))
        (let ((quiet (ice-silent-secs agent)))
-         (or (null quiet) (< quiet *peer-silence-limit*)))))
+         (or (null quiet)
+             (< quiet (if away *away-grace* *peer-silence-limit*))))))
 
 ;; ---- the desktop's sound -----------------------------------------------------
 ;; What the peer hears is what the DESKTOP is playing, and the desktop is a different process:
@@ -687,7 +717,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                            *video-max-frame-kb* *video-cleanup-ms*
                            vp8::*backlog-qi* vp8::*backlog-x*)))
                (webrtc-serve-datachannel
-                conn :duration 3600.0 :alive-p (lambda () (peer-alive-p agent))
+                conn :duration 3600.0 :alive-p (lambda () (peer-alive-p agent :away away))
                 :on-ready
                 (lambda (assoc sid)
                   (setf glass (glass-connect) *last-assoc* assoc)
@@ -732,6 +762,13 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                   ;; switch, applied to the running sender and answered with what took effect.
                   ;; Keeping it off the RFB stream is the point — that one is a byte protocol with
                   ;; its own framing, and nothing here has to know how to tell the two apart.
+                  ;; ANYTHING ARRIVING MEANS THE PEER IS BACK, and clearing the hint here rather
+                  ;; than in the control branch is deliberate: a returning phone resumes VIDEO and
+                  ;; INPUT long before it has anything to say on the control channel, so waiting for
+                  ;; a control message would leave a live session still wearing `away' and holding
+                  ;; the five-minute rope instead of the thirty-second one.  Cleared BEFORE the
+                  ;; dispatch below, so an `away' message re-arms it on the same pass.
+                  (setf away nil)
                   (cond
                     ((control-sid-p sid)
                      ;; Read the going-away hint off the control stream before handing the message
