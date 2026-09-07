@@ -685,7 +685,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                    (format *error-output* "~&[gw-nostr] video started — VP8 pt=~a qi=~a fps=~a maxqi=~a target=~aKB/s frame<=~aKB cleanup=~ams backlog-qi=~a/~ax~%"
                            *video-pt* *video-qi* *video-fps* *video-max-qi* *video-target-kbs*
                            *video-max-frame-kb* *video-cleanup-ms*
-                           webrtc-media.vp8::*backlog-qi* webrtc-media.vp8::*backlog-x*)))
+                           vp8::*backlog-qi* vp8::*backlog-x*)))
                (webrtc-serve-datachannel
                 conn :duration 3600.0 :alive-p (lambda () (peer-alive-p agent))
                 :on-ready

@@ -236,7 +236,7 @@ not on the ladder.  Setting webrtc-media:*VIDEO-PROFILE* is most of the mechanis
 re-reads it at the top of every pass — plus the backlog quantizer, which lives in the encoder."
   (when (member kbps *video-rungs*)
     (let ((p (rung-settings kbps)))
-      (setf webrtc-media.vp8::*backlog-qi* (getf p :backlog-qi)
+      (setf vp8::*backlog-qi* (getf p :backlog-qi)
             webrtc-media:*video-profile* (list* :name (format nil "~a kbps" kbps) p)
             *video-kbps* kbps)
       ;; The rung's OWN unit first — kbps/8 kilobytes per second, which is what the ladder is named
