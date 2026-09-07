@@ -412,7 +412,24 @@ silently drop CODE.)"
 
 (defvar *live* (make-hash-table :test 'equal))     ; phone pubkey -> its live SESS
 (defvar *live-lock* (bt:make-lock))
-(defparameter *peer-silence-limit* 30.0)           ; RFC 7675 consent is 30s; match it
+(defparameter *peer-silence-limit*
+  (or (ignore-errors (let ((e (uiop:getenv "PEER_SILENCE_LIMIT")))
+                       (and e (float (parse-integer e) 1.0))))
+      120.0)
+  "Seconds of peer silence before a session is closed.
+
+RFC 7675 says 30s, and that is right for a browser that is actively sending consent checks — but
+iOS SUSPENDS a backgrounded tab, so it sends nothing while the user reads a message.  At 30s,
+switching apps for half a minute reaps the session, and the phone's auto-reconnect papers over it
+with a full page reload every time.  That is worse than the leak it fixes.  120s survives an app
+switch; a phone that is really gone still goes, and superseding already covers the reconnect case.
+
+AND THIS NUMBER ONLY MEANS ANYTHING BECAUSE OF THE ICE FIX THAT ARRIVED WITH IT (webrtc-data
+299aa98, %NOTE-PEER-ALIVE): LAST-RX used to be stamped at the SOCKET, so the Refresh replies coturn
+sends for the allocation WE keep alive counted as the far end being present.  A relayed peer that
+vanished looked alive forever, no teardown could fire, and abandoned sessions kept their threads —
+one gateway log reached 7.7M lines of stats from peers long gone.  Raising a limit that never
+expired would have been decoration; the stamp had to start meaning `the peer sent something' first.")
 
 ;; ...AND THE SAME NUMBER IS WRONG FOR A PEER THAT SAID GOODBYE.  RFC 7675 is about a peer that has
 ;; VANISHED: consent to keep sending expires 30s after it stops answering, so nobody can be tricked
@@ -769,7 +786,20 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                   (bt:make-thread
                    (lambda ()
                      (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)))
-                       (loop until (eq (getf (sctp-stats assoc) :state) :aborted) do
+                       ;; :ABORTED is not how a session normally ends — the datachannel loop just
+                       ;; returns — so this thread outlived every clean teardown and logged every
+                       ;; two seconds forever.  One gateway log reached 7.7M lines this way, 81% of
+                       ;; the file, from peers long gone.  PEER-ALIVE-P is false once the agent is
+                       ;; closed, which is exactly the moment this should stop.
+                       ;;
+                       ;; Asked WITHOUT the away hint, deliberately: this is the stats thread, and
+                       ;; the question it needs answered is `is the agent still up', not `does this
+                       ;; peer deserve a longer rope'.  Passing :AWAY here would keep a logger
+                       ;; running for five minutes after a pocketed phone went quiet, which is the
+                       ;; leak this loop is being fixed for.
+                       (loop until (or (eq (getf (sctp-stats assoc) :state) :aborted)
+                                       (not (peer-alive-p agent)))
+                             do
                          (sleep 2.0)
                          (let* ((now (sctp-stats assoc)) (tn (get-internal-real-time))
                                 (dt (max 1d-3 (/ (float (- tn tp) 1d0) internal-time-units-per-second))))
