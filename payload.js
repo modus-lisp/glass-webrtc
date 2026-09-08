@@ -215,7 +215,11 @@ export async function init(api) {
        trade the ▤ button is asking you to make when you open it.
        Class names come from warp/dom/client.js and are the same ones its standalone page styles:
        .v .l .stale on a row, .t .c on a menu item, and selected / warn / bad / destructive. */
-    #warpPanel{position:fixed;left:10px;right:10px;top:52px;bottom:150px;z-index:23;display:none;
+    /* Geometry is NOT here: .richPanel owns it, so the windowed size and the full-screen
+       size are one rule apart instead of an ID selector apart -- which is what this rule
+       losing to nothing and beating .full taught, the panel keeping its inset while
+       wearing the class that says it should not have one. */
+    #warpPanel{position:fixed;z-index:23;display:none;
       flex-direction:column;background:rgba(8,10,14,.93);border:1px solid rgba(255,255,255,.12);
       border-radius:12px;overflow:hidden;
       font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#dce4ec}
@@ -251,7 +255,11 @@ export async function init(api) {
        there never was: the server sends 'in' and 'after' and this file decides what a column is.
        Class names come from warp/dom/client.js: .entry > .n .d on a file row (the ENTRY widget),
        .t .c on a menu item, and .container / .opaque / .cap / .dim for what nesting added. */
-    #filesPanel{position:fixed;left:10px;right:10px;top:52px;bottom:150px;z-index:23;display:none;
+    /* Geometry is NOT here: .richPanel owns it, so the windowed size and the full-screen
+       size are one rule apart instead of an ID selector apart -- which is what this rule
+       losing to nothing and beating .full taught, the panel keeping its inset while
+       wearing the class that says it should not have one. */
+    #filesPanel{position:fixed;z-index:23;display:none;
       flex-direction:column;background:rgba(8,10,14,.93);border:1px solid rgba(255,255,255,.12);
       border-radius:12px;overflow:hidden;
       font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#dce4ec}
@@ -341,9 +349,44 @@ export async function init(api) {
        struck through, dimmed, and captioned with why.  The point of the caption is that it is
        there BEFORE the tap — the bad version of this menu is the one you pick from and only then
        find out.  See the ⊞ block for why the client cannot know any earlier than that. */
+    #appsMenu button[aria-current="true"]{background:rgba(42,74,99,.55);color:#eaf2f8}
     #appsMenu button[disabled]{color:#5a646c;cursor:default}
     #appsMenu button[disabled] .an{text-decoration:line-through}
     #appsMenu .aw{flex:0 0 auto;color:#8a949c;font-size:10px;font-style:italic}
+
+    /* ---- how big a rich app gets, and when it stops pretending to be a window ----------------
+       A panel inset by FIXED PIXELS is a window on a laptop and a hairline border around the
+       whole screen on a phone: the same CSS making two different claims, and the second one is
+       false.  There is no desktop visible behind a 10px margin -- only a sliver of it -- so the
+       window frame is decoration around something that has already taken the screen.
+
+       So a panel gets a natural SIZE, capped, and the client measures what that size covers.
+       Covering most of the viewport means it is not a panel over a desktop, it is the screen,
+       and it should say so: edge to edge, no frame, and a switcher along the top where the
+       desktop used to be one tap away behind the panel's edge.
+
+       The cap is here in CSS and NOT duplicated in JS -- showApp measures the real rectangle
+       rather than recomputing these numbers, so there is one place to change and no drift. */
+    .richPanel{left:50%;right:auto;top:52px;bottom:auto;transform:translateX(-50%);
+      width:min(720px,calc(100vw - 20px));height:min(900px,calc(100vh - 202px))}
+    .richPanel.full{left:0;right:0;top:44px;bottom:0;width:auto;height:auto;transform:none;
+      border:0;border-radius:0}
+
+    /* ---- the switcher: what a full-screen app has instead of an edge -------------------------
+       One strip, built from the same richApps list the menu is, so an app is in both or in
+       neither.  The desktop is in it, because the desktop is one of them. */
+    #appSwitch{position:fixed;top:0;left:0;right:0;height:44px;z-index:34;display:none;
+      align-items:center;gap:6px;padding:0 8px;overflow-x:auto;
+      background:rgba(8,10,14,.97);border-bottom:1px solid rgba(255,255,255,.12);
+      font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+    #appSwitch.on{display:flex}
+    #appSwitch button{flex:0 0 auto;display:flex;align-items:center;gap:7px;height:32px;
+      padding:0 12px;border:0;border-radius:16px;background:rgba(255,255,255,.06);
+      color:#cdd6df;font:inherit;white-space:nowrap}
+    #appSwitch button[aria-current="true"]{background:#2a4a63;color:#eaf2f8}
+    #appSwitch button[disabled]{color:#5a646c}
+    #appSwitch button[disabled] .sn{text-decoration:line-through}
+    #appSwitch .sg{font-size:15px}
     /* ==== END the app menu's stylesheet ======================================================= */
 `;
   document.head.appendChild(style);
@@ -1345,7 +1388,18 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     //
     // The memory is per-link and resets on channel close, alongside the nodes and for the same
     // reason: the box on the other end of a reconnect is entitled to say something different.
-    const richApps = [];        // {id, glyph, name, served, show(on)} — pushed by each app below
+    const richApps = [];        // {id, glyph, name, served, show(on), panel?} — pushed by each app
+    // THE DESKTOP IS ONE OF THEM.  It used to be the ground the panels floated over, reachable
+    // only by closing whatever was up — which made "go to the desktop" the one destination with
+    // no name, no entry, and a different gesture from every other place you can go.  Listing it
+    // makes switching UNIFORM: every destination is a row in the same menu and a chip in the same
+    // strip, and closing an app stops being a special verb.
+    //
+    // It has no panel and its show() does nothing, which is exactly right: showing the desktop IS
+    // hiding the others, and showApp already does that to every app that is not the target.
+    const DESKTOP = { id: 'desktop', glyph: '▢', name: 'the desktop', served: true, panel: null,
+                      show: () => {} };
+    richApps.push(DESKTOP);
     const appsBackdrop = document.createElement('div');
     appsBackdrop.id = 'appsBackdrop';
     const appsMenu = document.createElement('div');
@@ -1357,15 +1411,75 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
 
     let appOpen = null, appsMenuOn = false;
 
+    // ---- the switcher, which is what a full-screen app has instead of an edge ----------------
+    const appSwitch = document.createElement('div');
+    appSwitch.id = 'appSwitch';
+    document.body.appendChild(appSwitch);
+
+    const drawSwitch = current => {
+      appSwitch.classList.toggle('on', !!current);
+      appSwitch.textContent = '';
+      if (!current) return;
+      for (const a of richApps) {
+        const b = document.createElement('button');
+        b.dataset.app = a.id;
+        b.setAttribute('aria-label', a.name);
+        if (a === current) b.setAttribute('aria-current', 'true');
+        const g = document.createElement('span'); g.className = 'sg'; g.textContent = a.glyph;
+        const n = document.createElement('span'); n.className = 'sn'; n.textContent = a.name;
+        b.append(g, n);
+        if (a.served === false) b.disabled = true;
+        else b.addEventListener('click', () => showApp(a));
+        appSwitch.appendChild(b);
+      }
+      // THE STRIP SCROLLS, so the chip that says where you are can be off the end of it -- which
+      // is the one chip that must never be the hidden one.  Pulled into view after the strip is
+      // built, because it has no width until then.
+      const here = appSwitch.querySelector('[aria-current="true"]');
+      if (here) here.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    };
+
+    // WOULD THIS PANEL BE MOST OF THE SCREEN?  Measured, not computed: the panel is shown at its
+    // windowed size and its real rectangle is read, so the cap lives once in CSS and this cannot
+    // drift from it.  Above the threshold the frame is a fiction — the desktop behind it is a
+    // sliver nobody can use — so the panel takes the screen and the switcher takes the top.
+    // MEASURED BEFORE IT IS SHOWN, and that ordering is the whole subtlety.  An app reports its
+    // viewport from inside show(), in rows that it counts off its own body height -- so the panel
+    // has to already be its final size when show() runs, or the box is told a row count for a
+    // geometry that lasted one frame.  Hence: lay it out hidden, measure, decide, THEN show.  The
+    // alternative (show, resize, re-report) puts a second viewport message on the wire for every
+    // open, and "opening the panel sends exactly one thing" is an assertion this client keeps.
+    const FULL_AT = 0.55;
+    const wouldFill = panel => {
+      const d = panel.style.display, v = panel.style.visibility;
+      panel.style.visibility = 'hidden'; panel.style.display = 'flex';
+      panel.classList.remove('full');
+      const r = panel.getBoundingClientRect();
+      panel.style.display = d; panel.style.visibility = v;
+      return r.width * r.height >= FULL_AT * innerWidth * innerHeight;
+    };
+
     // EXACTLY ONE RICH PANEL IS EVER UP.  Not a rule about screen space — both panels are fixed to
     // the same rectangle and would simply stack — but about what the button means.  It is showing
-    // you one app; closing puts you back on the desktop rather than into the other one.
+    // you one app; switching puts you in another, and the desktop is one of the places to be.
     const showApp = a => {
-      for (const b of richApps) if (b !== a) b.show(false);
-      appOpen = a || null;
-      if (a) a.show(true);
-      setBtn(appsBtn, a ? 'on' : 'off');
+      const to = a || DESKTOP;
+      for (const b of richApps) if (b !== to) b.show(false);
+      appOpen = to === DESKTOP ? null : to;   // callers still read this as "is an app up"
+      const full = !!(to.panel && wouldFill(to.panel));
+      for (const b of richApps) if (b.panel) b.panel.classList.toggle('full', full && b === to);
+      to.show(true);                          // final geometry already set: one viewport report
+      drawSwitch(full ? to : null);
+      setBtn(appsBtn, to === DESKTOP ? 'off' : 'on');
     };
+    // A ROTATION CAN CROSS THE THRESHOLD.  Only the classes are touched here: each app already
+    // re-reports its own viewport on resize, and doing it for them would report it twice.
+    window.addEventListener('resize', () => {
+      if (!appOpen || !appOpen.panel) return;
+      const full = wouldFill(appOpen.panel);
+      appOpen.panel.classList.toggle('full', full);
+      drawSwitch(full ? appOpen : null);
+    });
     // Rebuilt on every open rather than kept in step, because it is four elements and the thing it
     // reports — whether an app answered — changes underneath it.
     const drawApps = () => {
@@ -1377,6 +1491,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
         const b = document.createElement('button');
         b.dataset.app = a.id;
         b.setAttribute('aria-label', a.name);
+        if (a === (appOpen || DESKTOP)) b.setAttribute('aria-current', 'true');
         const g = document.createElement('span'); g.className = 'ag'; g.textContent = a.glyph;
         const n = document.createElement('span'); n.className = 'an'; n.textContent = a.name;
         b.append(g, n);
@@ -1493,8 +1608,9 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // report, the first-open hello, the no-answer timeout that names which thing is missing — and
     // so is every byte on the wire, every element in the panel and every authorization decision,
     // all of which are the box's.  This is a rearrangement of how the panel is REACHED.
+    warpPanel.classList.add('richPanel');
     const warpApp = {
-      id: 'devices', glyph: '▤', name: 'enrolled terminals', served: null,
+      id: 'devices', glyph: '▤', name: 'enrolled terminals', served: null, panel: warpPanel,
       show: on => {
         warpOn = on;
         warpPanel.style.display = on ? 'flex' : 'none';
@@ -1547,6 +1663,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // where a Miller column becomes 186 pixels wide.  The server sends no geometry whatsoever.
     const filesPanel = document.createElement('div');
     filesPanel.id = 'filesPanel';
+    filesPanel.classList.add('richPanel');
     filesPanel.innerHTML =
       '<div id="filesHead"><b>files</b><span id="filesStat">—</span>' +
         '<button id="filesUp" title="send a file to this folder">↑</button></div>' +
@@ -1589,7 +1706,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // third app is a `richApps.push` and nothing else — no glyph hunting for a free 60 pixels, no
     // decision about which corner it stacks in.
     const filesApp = {
-      id: 'files', glyph: '🗀', name: 'files', served: null,
+      id: 'files', glyph: '🗀', name: 'files', served: null, panel: filesPanel,
       show: on => {
         filesOn = on;
         filesPanel.style.display = on ? 'flex' : 'none';
