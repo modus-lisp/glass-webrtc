@@ -7,7 +7,7 @@ else on this page:
 
 | | source | built by | how a change ships |
 |---|---|---|---|
-| **single page** (deployed today, k39) | `index-nostr.html` | `mkbundle.py` | edit → build → **publish under a new tag** → check-deploy → hand out a new URL |
+| **single page** (deployed today, k39) | `index-nostr.html` | `tools/mkbundle.lisp` | edit → build → **publish under a new tag** → check-deploy → hand out a new URL |
 | **split** (built, tested, **not deployed**) | `index-shell.html` + `shell.js` + `payload.js` | `mksplit.py` | edit `payload.js` → build → `cp payload.js* ` beside the gateway → **the user reloads the same URL** |
 
 The split exists because the second row is the whole point: four publishes happened in one day
@@ -29,7 +29,7 @@ Edit `index-nostr.html`. Everything else in that pipeline is generated from it.
 | `nsite-index.html` (build dir) | `index-nostr.html` with the bundle spliced back in place of the module body | no — generated |
 | `index.html`, `index-ws.html` | older standalone pages, each with its own hand-copied gesture layer | only for local `gateway.lisp` testing |
 
-The direction matters: `mkbundle.py` reads `index-nostr.html` and *writes* `entry.mjs`, so edits to
+The direction matters: the bundler reads `index-nostr.html` and *writes* the entry module, so edits to
 `entry.mjs` are destroyed by the next build. (The deployed blob carries `index-nostr.html`'s markup
 verbatim, which is how to confirm this for yourself.)
 
@@ -39,7 +39,8 @@ there has no effect on the device.
 ## The pipeline
 
 ```
-index-nostr.html ──extract──▶ entry.mjs ──esbuild──▶ bundle.js
+index-nostr.html ──extract──▶ entry.mjs ──shuttle──▶ bundle.js
+                                (vendor/, no npm)
        │                                                 │
        └────────── shell ──────────▶ splice ◀────────────┘
                                        │
@@ -89,14 +90,47 @@ regenerates it automatically. Rebuild it with the recipe above.
 
 
 ```sh
-export NSITE_BUILD=/path/to/nsite-build   # node_modules + generated artefacts
-python3 mkbundle.py
+sbcl --script tools/mkbundle.lisp        # writes nsite-index.html beside the source
 ```
 
-`mkbundle.py` does the whole extract → rewrite → bundle → splice, taking `index-nostr.html` from
-beside itself (`$NSITE_SRC` overrides). Do not run esbuild by hand: the script also rewrites
-`https://esm.sh/nostr-tools@2.15.0/` to the locally-installed package, and works around the build
-dir's dangling `node_modules/.bin/esbuild` symlink by finding a real binary under `~/.npm/_npx/`.
+**No node, no npm, no esbuild, and nothing fetched** — for the SINGLE-PAGE client. The split
+client (`mksplit.py`, below) still uses the esbuild path; converting it needs the same treatment
+twice plus a gzip, and has not been done. `tools/mkbundle.lisp` does the whole
+extract → rewrite → bundle → splice with shuttle, whose bundler parses the module graph, resolves
+it against the committed `vendor/`, and prints one script. It rewrites
+`https://esm.sh/nostr-tools@2.15.0/` to a bare specifier (the source imports from a CDN so the
+page also runs unbundled during development) and fails the build if any `esm.sh` URL survives into
+the output — a surviving one would fetch at runtime, which is the thing bundling exists to prevent.
+
+It needs shuttle checked out beside this repo. Nothing else.
+
+`mkbundle.py` is still here and still works if you have npm and esbuild, but it is now the
+LEGACY path: it fetches nothing that `vendor/` does not already hold, and its output is only
+smaller because esbuild minifies. Prefer the Lisp one; it is the one with no dependencies.
+
+### The dependencies are committed
+
+`vendor/` holds the browser client's JS dependencies — 128 files, 1.4 MB, licences included:
+
+| package | version | licence |
+|---|---|---|
+| `nostr-tools` | 2.15.0 | Unlicense |
+| `@noble/curves` | 1.2.0 | MIT |
+| `@noble/hashes` | 1.3.1 | MIT |
+| `@noble/hashes` (nested under curves) | 1.3.2 | MIT |
+| `@noble/ciphers` | 0.5.3 | MIT |
+| `@scure/base` | 1.1.1 | MIT |
+
+Each package contributes its `package.json` (the `exports` map is what resolves
+`nostr-tools/pure`), its `LICENSE`, and its **ESM tree only** — the CJS build at the package root
+is dead weight for a browser bundle.
+
+The node_modules **layout is preserved exactly, nested copies included**: `@noble/curves` ships
+its own `@noble/hashes` at 1.3.2 while the top level has 1.3.1, the real graph reaches **both**,
+and flattening them would silently change which cryptography runs.
+
+Refresh it with `tools/vendor-js.sh [node_modules-dir]` — the only step that wants npm, run by
+hand when a dependency changes, never at build time.
 
 It prints a self-check — treat a non-zero count as a failed build:
 
@@ -147,7 +181,7 @@ $EDITOR index-nostr.html
 
 # 2. build — self-check must read "leftover esm.sh: 0 | import-from-url: 0"
 export NSITE_BUILD=/path/to/nsite-build
-python3 mkbundle.py
+sbcl --script tools/mkbundle.lisp
 
 # 3. publish under a NEW tag — watch for at least one "accepted=T"
 #    (needs the site key: $SITE_SEC or ~/.glass/site-key — see Secrets)
@@ -287,19 +321,23 @@ on crash, and must not have this code in it.
 
 ## Where the build dir is
 
-`mkbundle.py` and `publish.lisp` live **in this directory**, in the repo, and bake in no paths:
+`tools/mkbundle.lisp` and `publish.lisp` live **in this directory**, in the repo, and bake in no
+paths:
 
 ```sh
-export NSITE_BUILD=/path/to/nsite-build     # holds node_modules + generated artefacts
-python3 mkbundle.py                          # SRC defaults to index-nostr.html beside the script
-SITE_VERSION=k30 sbcl --script publish.lisp  # reads NSITE_BUILD too, or takes a path as argv
+sbcl --script tools/mkbundle.lisp            # writes nsite-index.html beside the source
+SITE_VERSION=k30 sbcl --script publish.lisp  # reads NSITE_BUILD, or takes a path as argv
 ```
 
-Only the build directory is outside the repo, because it carries a few hundred MB of
-`node_modules` plus generated output. It needs `nostr-tools` installed (`npm install
-nostr-tools@2.15.0`); a `/tmp` cleanup has eaten it before, and the symptom is
-`Could not resolve "nostr-tools/pure"` with the **output hash unchanged** — so the publish that
-follows would ship the previous build without a word.
+**There is no build directory any more, and no `node_modules`.** The dependencies are in
+`vendor/`, committed; the only thing outside the repo is wherever you point `publish.lisp`.
+
+That closes a real trap. The old build dir held several hundred MB of `node_modules` outside the
+repo, a `/tmp` cleanup had eaten it before, and the symptom was `Could not resolve
+"nostr-tools/pure"` with the **output hash unchanged** — so the publish that followed shipped the
+previous build without a word. It also left a dangling `novnc` symlink pointing into
+`webrtc-data/demo/glass-webrtc/`, from before this repo was split out, which nothing noticed
+because nothing rebuilt from scratch. A build that reads only committed files cannot rot that way.
 
 ## The publisher was silently dropping events (fixed)
 
@@ -373,6 +411,12 @@ noVNC — 61% of the old bundle on its own — never touches nsite again.
 export NSITE_BUILD=/path/to/nsite-build     # needs node_modules AND a ./novnc symlink
 python3 mksplit.py
 ```
+
+> **This path still needs npm.** `mksplit.py` builds two bundles with esbuild where
+> `tools/mkbundle.lisp` builds one with shuttle. The dependencies it resolves are the same ones
+> now committed in `vendor/`, so the conversion is mechanical — two bundles instead of one, plus
+> the gzip, which would want `cram` since shuttle has no deflate. Until then this is the one
+> remaining build step that fetches.
 
 Four artefacts, and the self-check must read `leftover esm.sh: 0 | import-from-url: 0`:
 
