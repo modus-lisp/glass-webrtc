@@ -249,7 +249,7 @@ export async function init(api) {
        data-container — so Miller columns are 'display:flex' on the parent and a fixed width on the
        child, and the horizontal scroll is the browser's own.  There is no layout on the wire and
        there never was: the server sends 'in' and 'after' and this file decides what a column is.
-       Class names come from warp/dom/client.js, same as the panel above: .v .l .stale on a row,
+       Class names come from warp/dom/client.js: .entry > .n .d on a file row (the ENTRY widget),
        .t .c on a menu item, and .container / .opaque / .cap / .dim for what nesting added. */
     #filesPanel{position:fixed;left:10px;right:10px;top:52px;bottom:150px;z-index:23;display:none;
       flex-direction:column;background:rgba(8,10,14,.93);border:1px solid rgba(255,255,255,.12);
@@ -282,8 +282,14 @@ export async function init(api) {
     #filesRows .container li:first-child{background:#0f1319;color:#8a949c;position:sticky;top:0;
       border-bottom:1px solid rgba(255,255,255,.12);letter-spacing:.03em}
     #filesRows li.selected{background:#26303c;border-left-color:#5abe82}
-    #filesRows li .v{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    #filesRows li .l{margin-left:auto;color:#6a747c;font-size:10px;flex:0 0 auto}
+    /* ENTRY ROWS, NOT PLAIN ROWS.  A file row is the ENTRY widget now -- client.js paints it
+       .entry > .n .d, where the device manager's plain rows stay .v .l .stale.  The tag the app
+       sends (dir / file / head) lands as a class, so the rule down the left says which kind it is
+       without this panel knowing the app's vocabulary. */
+    #filesRows li .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #filesRows li .d{margin-left:auto;color:#6a747c;font-size:10px;flex:0 0 auto}
+    #filesRows li.entry.dir,#filesRows li.entry.head,#filesRows li.entry.up{border-left-color:#9fd8ff}
+    #filesRows li.entry.file,#filesRows li.entry.track{border-left-color:#5abe82}
     #filesRows li .stale{display:none}         /* per row it is noise; the header carries the age */
     /* AN OPAQUE NODE IS A HOLE AND IS DRAWN AS ONE.  Dashed, captioned, and deliberately not
        row-shaped: the app said what this region is and this client cannot show it, so the honest
@@ -831,33 +837,328 @@ function makeWarpClient(opts) {
     if (w) { waiting.delete(rec.key); for (const r of w) place(r); }
   }
 
+  // ---- the widget table: what a row's cells MEAN, per declared type ----------------------
+  //
+  // MIRRORS src/widget.lisp, and mirrors it deliberately rather than receiving it.  Sending the
+  // declarations down the wire was the alternative and it buys nothing here: a client paints the
+  // kinds it has CSS for, so a kind it has never heard of is one it could not draw even if it
+  // were told the layout.  What it does instead is fall back to a plain row, which is what every
+  // client did before any of this and is never worse than guessing.
+  //
+  // WHAT THIS REPLACES is three branches that inferred a row's kind from its DATA:
+  //
+  //     if (d.type === "menu-item")     [label, cost, destructive?]
+  //     else if (cells[2] === "opaque") [caption, dims, "opaque"]
+  //     else                            [value, label, trend]
+  //
+  // The third slot meant trend, or destructive, or the literal tag "opaque", decided by testing
+  // its own contents.  That held while every client was a flat list of one kind of thing and
+  // stopped holding the moment one was not: a pivot row is a label, one number per column and a
+  // total, so there is no third slot to sniff and no width to widen to.
+  //
+  // `repeat' is the group that varies with the data — one cell per column of a slice — and there
+  // is at most one, so a layout resolves from both ends: fixed names before it, fixed names after
+  // it, and whatever is left in the middle.
+  const WIDGETS = {
+    "menu-item":       {fixed: ["label", "cost", "tone"]},
+    "row":             {fixed: ["value", "label", "trend"]},
+    "opaque":          {before: ["caption", "dimensions"], repeat: "detail", after: ["kind"]},
+    "heading":         {fixed: ["text", "level"]},
+    "prose":           {fixed: ["text"]},
+    "table-head":      {before: ["corner"], repeat: "column", after: ["total"]},
+    "table-row":       {before: ["label"],  repeat: "value",  after: ["total"]},
+    "table-total":     {fixed: ["label", "value"]},
+    "chip":            {fixed: ["label"]},
+    "entry":           {fixed: ["label", "detail", "tag"]},
+    "button":          {fixed: ["glyph", "kind"]},
+    "meter":           {fixed: ["state"]},
+    "toggle":          {fixed: ["label", "state"]},
+    "choice":          {fixed: ["label", "state"]},
+    "field":           {fixed: ["label", "value"]},
+    // The document client's own types map onto those kinds.  An app declares this in Lisp with
+    // DEFINE-WIDGET; here it is the same statement in the encoding that has to draw it.
+    "heading-row":     {fixed: ["text", "level"]},
+    "prose-row":       {fixed: ["text"]},
+    "slice-head-row":  {before: ["corner"], repeat: "column", after: ["total"]},
+    "slice-data-row":  {before: ["label"],  repeat: "value",  after: ["total"]},
+    "slice-total-row": {fixed: ["label", "value"]},
+    "crumb-chip":      {fixed: ["label"]},
+    // warp-files and warp-media both present ENTRY under their own names, and warp-media's
+    // controls are core's BUTTON and METER.  Listing them here is what the catalogue found
+    // missing: declared in Lisp, unpaintable in the browser, falling silently through to the
+    // three-cell row.
+    "fs-head":         {fixed: ["label", "detail", "tag"]},
+    "fs-dir":          {fixed: ["label", "detail", "tag"]},
+    "fs-file":         {fixed: ["label", "detail", "tag"]},
+    "media-head":      {fixed: ["label", "detail", "tag"]},
+    "media-dir":       {fixed: ["label", "detail", "tag"]},
+    "media-track":     {fixed: ["label", "detail", "tag"]},
+    "media-control":   {fixed: ["glyph", "kind"]},
+    "media-seek":      {fixed: ["state"]},
+    // ...and both present rule 9's OPAQUE node under their own name too.  Leaving these two out
+    // is not a missing style, it is a missing TYPE: with no layout, `at("kind")` is null, the
+    // opaque branch below never fires, and a preview paints as an ordinary row -- silently, which
+    // is the whole reason widget-table drift is now a test rather than a habit.
+    "fs-preview":      {fixed: ["caption", "dimensions", "kind"]},
+    // The device manager's two types ARE core's ROW, which is why they painted correctly while
+    // undeclared -- the generic branch is the one they wanted.  Named anyway: "it happens to fall
+    // through to the right place" is not the same statement as "this is a row", and only the
+    // second one survives someone editing the fallback.
+    "enrolment":       {fixed: ["value", "label", "trend"]},
+    "stat":            {fixed: ["value", "label", "trend"]},
+    "media-transport": {fixed: ["title", "clock", "state", "error"]},
+    "media-picture":   {before: ["caption", "dimensions"], repeat: "detail", after: ["kind"]},
+    "cat-head":        {fixed: ["text", "level"]},
+    "cat-note":        {fixed: ["text"]},
+    "cat-menu":        {fixed: ["label", "cost", "tone"]},
+    "cat-icon":        {fixed: ["glyph", "label"]},
+  };
+
+  // Resolve a declaration against an actual row: n names, one per cell, or null when the type is
+  // undeclared or the row is too narrow to satisfy it.  Same rule as WIDGET-LAYOUT in Lisp, and
+  // the Lisp side has the test that proves both ends agree.
+  function layoutOf(type, n) {
+    const w = WIDGETS[type];
+    if (!w) return null;
+    if (w.fixed) return w.fixed.length === n ? w.fixed.slice() : null;
+    const fixed = w.before.length + w.after.length;
+    if (n < fixed) return null;
+    return w.before.concat(new Array(n - fixed).fill(w.repeat), w.after);
+  }
+
+  // ---- icons: the same path data src/icons.lisp holds ------------------------------------
+  //
+  // MIRRORED, like the widget table, and for the same reason: a client draws what it has a
+  // renderer for, so an icon it has never heard of is one it could not draw even if it were sent
+  // the path.  What it does instead is print the glyph as text -- which is what every client did
+  // before icons existed, and is exactly right for a consumer with no geometry.
+  //
+  // t/icons.lisp asserts the two tables carry the same names, so this cannot quietly drift.
+  const ICONS = {
+    play:          {d: "M8 5v14l11-7z", fill: true},
+    pause:         {d: "M6 5h4v14H6z M14 5h4v14h-4z", fill: true},
+    stop:          {d: "M6 6h12v12H6z", fill: true},
+    prev:          {d: "M7 5h2v14H7z M20 5v14l-10-7z", fill: true},
+    next:          {d: "M15 5h2v14h-2z M4 5l10 7-10 7z", fill: true},
+    "chevron-right": {d: "M9 5l7 7-7 7"},
+    "chevron-left":  {d: "M15 5l-7 7 7 7"},
+    "chevron-down":  {d: "M5 9l7 7 7-7"},
+    "chevron-up":    {d: "M5 15l7-7 7 7"},
+    close:         {d: "M6 6l12 12 M18 6L6 18"},
+    check:         {d: "M4 12l5 6L20 6"},
+    plus:          {d: "M12 5v14 M5 12h14"},
+    minus:         {d: "M5 12h14"},
+    folder:        {d: "M3 6h6l2 2h10v11H3z"},
+    file:          {d: "M6 3h8l4 4v14H6z M14 3v4h4"},
+    trash:         {d: "M5 7h14 M9 7V5h6v2 M7 7l1 13h8l1-13"},
+  };
+
+  // A glyph cell is a STRING drawn as text, as it always was, or a KEYWORD naming an icon.
+  //
+  // TOLD APART BY LOOKUP, NOT BY SYNTAX.  The first attempt tested for a leading colon, on the
+  // assumption that %JSON-WRITE renders :PLAY as ":play" -- it does not, it renders "play", so
+  // the test never fired and every button drew its name as text.  Looking the string up in the
+  // table is simpler and has a better failure mode: an unknown glyph is drawn, which is exactly
+  // what a literal like "|<" wants.
+  //
+  // The cost is that a literal glyph spelled "play" gets the play icon.  That is a collision
+  // worth having: an app that writes "play" in a glyph cell means the play icon.
+  function iconEl(glyph) {
+    if (typeof glyph !== "string") return null;
+    const ico = ICONS[glyph.toLowerCase()];
+    if (!ico) return null;
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "icon");
+    const path = document.createElementNS(NS, "path");
+    path.setAttribute("d", ico.d);
+    if (ico.fill) { path.setAttribute("fill", "currentColor"); }
+    else { path.setAttribute("fill", "none"); path.setAttribute("stroke", "currentColor");
+           path.setAttribute("stroke-width", "2"); path.setAttribute("stroke-linecap", "round");
+           path.setAttribute("stroke-linejoin", "round"); }
+    svg.appendChild(path);
+    return svg;
+  }
+
   function paint(li, d) {
     const cells = d.cells || [];
-    if (d.type === "menu-item") {
-      li.className = cells[2] === "destructive" ? "destructive" : "";
+    const names = layoutOf(d.type, cells.length);
+    const at = (name) => { const i = names ? names.indexOf(name) : -1;
+                           return i < 0 ? null : cells[i]; };
+
+    if (d.type === "cat-icon") {
+      li.className = "iconcell";
       li.innerHTML = "";
-      li.append(cell("t", cells[0]));
-      if (cells[1]) li.append(cell("c", cells[1]));
-    } else if (cells[2] === "opaque") {
-      // AN OPAQUE NODE IS A HOLE, AND THE CAPTION IS THE WHOLE OF WHAT WE GET (DESIGN.md rule 9).
-      // The app offers this region as pixels; this client cannot blit and is not going to be given
-      // a way to — the wire is JSON cells, "binary payloads" is an open design question, and
-      // sneaking the bytes through here would answer it by accident.  What arrives is a caption the
-      // app chose and a size, so what we draw is a labelled placeholder saying what is not shown.
-      // It is not a row and must not look like one, which is why it gets its own class and cells.
+      const svg = iconEl(at("glyph"));
+      const g = document.createElement("span"); g.className = "g";
+      if (svg) g.appendChild(svg); else g.textContent = String(at("glyph"));
+      li.append(g, cell("n", at("label")));
+      return;
+    }
+
+    if (d.type === "cat-menu") {
+      li.className = at("tone") === "destructive" ? "menusample destructive" : "menusample";
+      li.innerHTML = "";
+      li.append(cell("t", at("label")));
+      if (at("cost")) li.append(cell("c", at("cost")));
+      return;
+    }
+
+    if (d.type === "menu-item" && at("cost") === "text") {
+      // A PROMPT ITEM: tapping it means ASK ME.  The keyboard is entirely the client's, between
+      // this tap and the cmd message below -- which is why warp needed no new gesture and sees
+      // no keystrokes.
+      li.className = "prompt";
+      li.innerHTML = "";
+      li.append(cell("t", at("label")), cell("c", "…"));
+      return;
+    }
+
+    if (d.type === "menu-item") {
+      // `live' is STATE, not a cell: which value is currently set is this consumer's view of the
+      // choice, not part of the choice's content.  See the note in src/menu.lisp.
+      li.className = (at("tone") === "destructive" ? "destructive" : "") +
+                     ((d.state && d.state.live) ? " live" : "");
+      li.innerHTML = "";
+      li.append(cell("t", at("label")));
+      if (at("cost")) li.append(cell("c", at("cost")));
+      return;
+    }
+
+    // AN OPAQUE NODE IS A HOLE, AND THE CAPTION IS THE WHOLE OF WHAT WE GET (DESIGN.md rule 9).
+    // The app offers this region as pixels; this client cannot blit and is not going to be given
+    // a way to — the wire is JSON cells, "binary payloads" is an open design question, and
+    // sneaking the bytes through here would answer it by accident.  Detected by TYPE now rather
+    // than by finding the word "opaque" in a data slot; the cell survives so an older app that
+    // has not declared its type still lands here.
+    if (d.type === "opaque" || at("kind") === "opaque") {
       li.className = "opaque";
       li.innerHTML = "";
-      li.append(cell("cap", cells[0]));
-      if (cells[1]) li.append(cell("dim", cells[1]));
-      if (d.as_of) { li.append(cell("stale", "as of " + d.as_of)); }
-    } else {
-      li.className = (d.state && d.state.selected) ? "selected " + trend(cells[2]) : trend(cells[2]);
-      li.innerHTML = "";
-      li.append(cell("v", cells[0]), cell("l", cells[1]));
-      // as_of is on every delta because DESIGN.md makes staleness first-class: under a budget a
-      // delta can arrive several passes late, and the consumer is entitled to see it.
-      if (d.as_of) { li.append(cell("stale", "as of " + d.as_of)); }
+      li.append(cell("cap", at("caption") ?? cells[0]));
+      const dim = at("dimensions") ?? cells[1];
+      if (dim) li.append(cell("dim", dim));
+      if (d.as_of) li.append(cell("stale", "as of " + d.as_of));
+      return;
     }
+
+    if (d.type === "entry" || d.type === "fs-head" || d.type === "fs-dir" ||
+        d.type === "fs-file" || d.type === "media-head" || d.type === "media-dir" ||
+        d.type === "media-track") {
+      // A NAME THAT LEADS.  The tag is the app's own keyword and an encoding that does not
+      // recognise one styles the row plainly -- which is why adding a kind needs no client edit.
+      const tag = String(at("tag") ?? "").replace(/^:/, "");
+      li.className = "entry" + (tag ? " " + tag : "") +
+                     ((d.state && d.state.selected) ? " selected" : "");
+      li.innerHTML = "";
+      li.append(cell("n", at("label")));
+      if (at("detail")) li.append(cell("d", at("detail")));
+      return;
+    }
+
+    if (d.type === "button" || d.type === "media-control") {
+      li.className = "button k-" + String(at("kind") ?? "").replace(/^:/, "");
+      li.innerHTML = "";
+      const svg = iconEl(at("glyph"));
+      if (svg) { const s = document.createElement("span"); s.className = "g"; s.appendChild(svg);
+                 li.append(s); }
+      else li.append(cell("g", at("glyph")));
+      return;
+    }
+
+    if (d.type === "meter" || d.type === "media-seek") {
+      // ONE SEGMENT.  The state is the whole cell, and the segment carries no text at all --
+      // a bar made of words would be a list, which is what this looked like before the client
+      // knew what a meter was.
+      li.className = "seg s-" + String(at("state") ?? "empty").replace(/^:/, "");
+      li.innerHTML = "";
+      return;
+    }
+
+    if (d.type === "heading" || d.type === "heading-row" || d.type === "cat-head") {
+      const lvl = String(at("level") || "h2").replace(/^:/, "");
+      li.className = "heading " + lvl;
+      li.innerHTML = "";
+      li.append(cell("h", at("text")));
+      return;
+    }
+
+    if (d.type === "prose" || d.type === "prose-row" || d.type === "cat-note") {
+      li.className = "prose";
+      li.innerHTML = "";
+      li.append(cell("p", at("text")));
+      return;
+    }
+
+    // A TABLE IS STILL A ROW OF CELLS, which is what makes it fit an encoding built for lists.
+    // The head and the body differ only in class, so a stylesheet aligns the columns and the
+    // client does not have to know the table exists as an object.
+    if (d.type === "table-head" || d.type === "slice-head-row" ||
+        d.type === "table-row"  || d.type === "slice-data-row") {
+      const head = d.type === "table-head" || d.type === "slice-head-row";
+      li.className = (head ? "trow thead" : "trow") +
+                     ((d.state && d.state.selected) ? " selected" : "");
+      li.innerHTML = "";
+      cells.forEach((c, i) => {
+        const name = names ? names[i] : null;
+        li.append(cell("td " + (name || ""), c));
+      });
+      return;
+    }
+
+    if (d.type === "table-total" || d.type === "slice-total-row") {
+      li.className = "ttotal";
+      li.innerHTML = "";
+      li.append(cell("l", at("label")), cell("v", at("value")));
+      return;
+    }
+
+    if (d.type === "field") {
+      const v = at("value");
+      li.className = "field" + (v ? "" : " empty");
+      li.innerHTML = "";
+      li.append(cell("n", at("label")), cell("val", v || "— not set —"));
+      return;
+    }
+
+    if (d.type === "toggle") {
+      // ON-NESS IS A CELL, not view state: it is a fact about the setting, so every seat sees it.
+      const on = String(at("state") ?? "").replace(/^:/, "") === "on";
+      li.className = "toggle" + (on ? " on" : "");
+      li.innerHTML = "";
+      li.append(cell("box", on ? "\u2713" : ""), cell("n", at("label")));
+      return;
+    }
+
+    if (d.type === "choice") {
+      // An option of an inline set.  WHICH ONE IS SET IS A CELL, not view state: the selected
+      // value is a fact about the setting, so every seat sees the same one.
+      li.className = "choice" +
+        (String(at("state") ?? "").replace(/^:/, "") === "live" ? " live" : "");
+      li.innerHTML = "";
+      li.append(cell("t", at("label")));
+      return;
+    }
+
+    if (d.type === "chip" || d.type === "crumb-chip") {
+      // ONE CHIP, ONE PRESENTATION, so it has a key and is tappable on its own.  It was a row of
+      // N cells and could only be tapped whole; a gesture carries a key and no coordinates, so
+      // there was nothing to send that said which cell.  Same answer core gives for menu items.
+      // The horizontal strip is the CONTAINER's doing (crumbs:*), not this row's.
+      li.className = "chip" + ((d.state && d.state.selected) ? " selected" : "");
+      li.innerHTML = "";
+      li.append(cell("t", at("label") ?? cells[0]));
+      return;
+    }
+
+    // THE FALLBACK IS THE OLD DEFAULT and stays exactly as it was: value, label, trend.  An app
+    // that has declared nothing gets what every app got before widgets existed.
+    li.className = (d.state && d.state.selected) ? "selected " + trend(cells[2]) : trend(cells[2]);
+    li.innerHTML = "";
+    li.append(cell("v", cells[0]), cell("l", cells[1]));
+    // as_of is on every delta because DESIGN.md makes staleness first-class: under a budget a
+    // delta can arrive several passes late, and the consumer is entitled to see it.
+    if (d.as_of) { li.append(cell("stale", "as of " + d.as_of)); }
   }
   function trend(t) { return t === "bad" ? "bad" : t === "warn" ? "warn" : ""; }
   function cell(cls, text) {
@@ -910,29 +1211,6 @@ function makeWarpClient(opts) {
 
   // ---- gestures: recognized HERE, sent as semantics.  Rule 5's vocabulary is closed and this
   // file does not extend it — every browser event below lands on tap / hold / two-finger.
-  //
-  // A DRAG IS NOT A SLOW TAP, and until now this file could not tell the difference.  There was no
-  // pointermove handler at all: `wheel` was the only thing that scrolled, and a phone never fires
-  // one.  So on touch the list could not be panned, and worse, dragging it and letting go SELECTED
-  // whatever was under the finger at release — the hold timer had not expired, so `onUp` read the
-  // release as a tap and opened a folder the user was only trying to scroll past.  Both are the
-  // same omission, and both are fixed by watching the pointer between down and up.
-  //
-  // THE DISCRIMINATION IS DISTANCE, NOT TIME, and it has to be: time already means something here
-  // (400ms is hold), so a drag cannot also be "a long press", and a fast flick is still a drag.
-  // Past DRAG-SLOP pixels the press stops being a press — the hold timer is cancelled and the
-  // release sends nothing.  Under it, nothing changes and a tap is exactly what it was.
-  //
-  // IT PANS IN ROWS, because that is the axis this encoding negotiates (§12) and the unit
-  // `two-finger` is defined in.  Pixels are accumulated and spent one row at a time, so the wire
-  // sees the same gesture the wheel already sent and the server learns no new vocabulary.  A row's
-  // height is measured off a real row rather than assumed, because the two panels using this client
-  // have different ones.
-  //
-  // The name stays `two-finger` even though this is one finger dragging.  Rule 5's enum is closed
-  // and it is closed on MEANING: this is the pan gesture, the encoding decides what pan does, and
-  // adding `drag` as a synonym would be a second word for one idea in a vocabulary whose whole
-  // point is that it is small.
 
   let holdTimer = null, held = null, listeners = null;
 
@@ -941,32 +1219,9 @@ function makeWarpClient(opts) {
     return li ? li.dataset.key : null;
   }
 
-  const DRAG_SLOP = 8;                  // px of travel before a press becomes a pan
-
   function attachGestures(root) {
     detachGestures();
-    let downY = 0, downX = 0, lastY = 0, acc = 0, dragging = false, tracking = false;
-
-    // One row, measured.  Falls back to the stylesheet's own 29px when the list is empty, which is
-    // exactly when a pan cannot do anything anyway.
-    const rowPx = () => {
-      const li = rowsEl.querySelector("li[data-key]");
-      return (li && li.offsetHeight) || 29;
-    };
-
-    const step = (dy) => {
-      scroll = Math.max(0, scroll + dy);
-      send({t: "gesture", g: "two-finger", dy: dy});
-    };
-
     const onDown = (ev) => {
-      tracking = true; dragging = false; acc = 0;
-      downX = ev.clientX; downY = ev.clientY; lastY = ev.clientY;
-      // Capture, so a finger that leaves the panel mid-drag keeps panning it instead of silently
-      // handing the gesture to whatever it crossed.
-      if (root.setPointerCapture && ev.pointerId != null) {
-        try { root.setPointerCapture(ev.pointerId); } catch (_) {}
-      }
       held = keyAt(ev);
       if (!held) return;
       // press-hold is a TIMING discrimination and it is timed locally, on purpose: 100-300ms of
@@ -974,31 +1229,7 @@ function makeWarpClient(opts) {
       holdTimer = setTimeout(() => { holdTimer = null; send({t: "gesture", g: "hold", key: held}); },
                              400);
     };
-
-    const onMove = (ev) => {
-      if (!tracking) return;
-      if (!dragging) {
-        if (Math.abs(ev.clientY - downY) < DRAG_SLOP &&
-            Math.abs(ev.clientX - downX) < DRAG_SLOP) return;
-        dragging = true;
-        // It was never a press.  Cancel the hold, and drop the key so the release cannot tap it.
-        if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
-        held = null;
-      }
-      // Finger up moves the content up, which is scrolling DOWN — the same sign the wheel sends.
-      acc += lastY - ev.clientY;
-      lastY = ev.clientY;
-      const h = rowPx();
-      while (acc >= h) { acc -= h; step(1); }
-      while (acc <= -h) { acc += h; step(-1); }
-    };
-
-    const onUp = (ev) => {
-      if (root.releasePointerCapture && ev && ev.pointerId != null) {
-        try { root.releasePointerCapture(ev.pointerId); } catch (_) {}
-      }
-      tracking = false;
-      if (dragging) { dragging = false; held = null; return; }   // a pan selects nothing
+    const onUp = () => {
       if (holdTimer) {
         clearTimeout(holdTimer); holdTimer = null;
         // A release inside the hold window is a tap.  A release AFTER it lands on whatever is under
@@ -1008,36 +1239,27 @@ function makeWarpClient(opts) {
       }
       held = null;
     };
-
-    const onCancel = () => {
-      tracking = false; dragging = false;
-      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
-      held = null;
-    };
-
     const onCtx = (ev) => {                                    // right-click is a hold
       const k = keyAt(ev);
       if (k) { ev.preventDefault(); send({t: "gesture", g: "hold", key: k}); }
     };
     const onWheel = (ev) => {                                  // wheel is the two-finger pan
-      step(ev.deltaY > 0 ? 1 : -1);
+      const dy = ev.deltaY > 0 ? 1 : -1;
+      scroll = Math.max(0, scroll + dy);
+      send({t: "gesture", g: "two-finger", dy: dy});
     };
     root.addEventListener("pointerdown", onDown);
-    root.addEventListener("pointermove", onMove);
     root.addEventListener("pointerup", onUp);
-    root.addEventListener("pointercancel", onCancel);
     root.addEventListener("contextmenu", onCtx);
     root.addEventListener("wheel", onWheel, {passive: true});
-    listeners = {root, onDown, onMove, onUp, onCancel, onCtx, onWheel};
+    listeners = {root, onDown, onUp, onCtx, onWheel};
   }
 
   function detachGestures() {
     if (!listeners) return;
     const l = listeners; listeners = null;
     l.root.removeEventListener("pointerdown", l.onDown);
-    l.root.removeEventListener("pointermove", l.onMove);
     l.root.removeEventListener("pointerup", l.onUp);
-    l.root.removeEventListener("pointercancel", l.onCancel);
     l.root.removeEventListener("contextmenu", l.onCtx);
     l.root.removeEventListener("wheel", l.onWheel);
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
@@ -1052,6 +1274,21 @@ function makeWarpClient(opts) {
     tap: (k) => send({t: "gesture", g: "tap", key: k}),
     hold: (k) => send({t: "gesture", g: "hold", key: k}),
     cmd: (name, key, confirmed) => send({t: "cmd", name, key, confirmed: !!confirmed}),
+    // TEXT INPUT, AND THE LINE IT DOES NOT CROSS.  `ask' collects a string with whatever this
+    // platform uses -- here window.prompt, on a phone the native keyboard with its own selection,
+    // autocorrect and IME -- and sends ONE message with the result.  No keystroke, cursor or
+    // intermediate string reaches the wire, which is the difference between text INPUT (this) and
+    // text EDITING (a continuous channel warp does not have).
+    //
+    // A CANCEL SENDS NOTHING.  window.prompt returns null when dismissed, and that is a different
+    // thing from an empty string: one means "I changed my mind", the other means "make it empty".
+    // Collapsing them would rename a file to "" on a mis-tap.
+    setText: (name, key, value) => { if (value != null) send({t: "cmd", name, key, value}); },
+    ask: (name, key, current, question) => {
+      const v = window.prompt(question || "value", current == null ? "" : String(current));
+      if (v != null) send({t: "cmd", name, key, value: v});
+      return v;
+    },
     viewport: (rows, sc) => send({t: "viewport", rows, scroll: sc}),
     // every row this client holds, in document order — which for a flat app is the rows element's
     // own children and for a nesting one reads across its containers, left to right
