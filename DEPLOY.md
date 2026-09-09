@@ -105,19 +105,37 @@ It needs shuttle checked out beside this repo. Nothing else.
 
 ### The size, stated plainly
 
-esbuild minified; these builds do not. Against the same sources:
+Both builds minify by default. `NSITE_MINIFY=0` turns it off when you need to read the bundle.
 
-| artefact | esbuild | shuttle | |
-|---|---|---|---|
-| `nsite-shell.html` | 114 KB | 351 KB | 3.1× |
-| `payload.js` | 266 KB | 786 KB | 3.0× |
-| **`payload.js.gz`** | **82 KB** | **202 KB** | **2.5×** |
-| `standalone.html` | 380 KB | 1.14 MB | 3.0× |
+| artefact | esbuild | shuttle, plain | shuttle, minified | |
+|---|---|---|---|---|
+| `nsite-shell.html` | 114 KB | 351 KB | 207 KB | 1.8× esbuild |
+| `payload.js` | 266 KB | 786 KB | 377 KB | 1.4× |
+| **`payload.js.gz`** | **82 KB** | **202 KB** | **101 KB** | **1.2×** |
+| `standalone.html` | 380 KB | 1.14 MB | 584 KB | 1.5× |
 
-The gzipped payload is the one that matters — it is what crosses the data channel to a phone,
-and it is 120 KB bigger. That is the price of not running a minifier we do not own, and it is a
-real price, not a rounding error. A minifier belongs in the stack eventually; it is a separate
-piece of work with its own oracle, and guessing at it would be worse than paying the bytes.
+The gzipped payload is the one that matters — it is what crosses the data channel to a phone.
+Deleting whitespace and comments halves it, and the remaining 19 KB over esbuild is almost
+entirely **identifier renaming**, which shuttle deliberately does not do.
+
+That line is where the risk changes character, not where the effort ran out. Whether two tokens
+can be pushed together is decidable from the lexical grammar one pair at a time; renaming needs a
+correct model of every scope in the program, and when it is wrong it produces a bundle that
+loads, runs, and is silently wrong somewhere far from the rename. 19 KB is not worth buying with
+that failure mode, and the door stays open: the scope analysis is real work with its own oracle,
+and it can be added later without changing anything else here.
+
+What is checked, on every build and over the whole corpus:
+
+- **`shuttle`'s minifier re-lexes its own output** and demands the identical token sequence, or
+  the build fails. That is a direct check of the claim it makes, not a proxy for it.
+- **`inspect/minify-gate.lisp`** parses all ~53,000 test262 programs before and after
+  minification and compares the ASTs. Shuttle's AST carries no source offsets, so two trees are
+  equal exactly when the two sources are the same program. This is the check that covers
+  **automatic semicolon insertion** — ASI reads line terminators in the *parser*, so deleting a
+  newline that mattered yields the identical token stream and a different program, which the
+  token check cannot see.
+- **the pages themselves** render pixel-identical to the unminified build, with no page errors.
 
 ### The dependencies are committed
 
@@ -425,6 +443,11 @@ sbcl --script tools/mksplit.lisp [out-dir]   # default: $NSITE_BUILD, else ./nsi
 No node, no npm, nothing fetched. `payload.js.gz` is written by `cram` with **mtime 0**, so an
 unchanged payload produces a byte-identical file — the gateway hashes what it reads, and a hash
 that moved because a clock moved would push a pointless transfer to every phone.
+
+The output is **minified** (whitespace and comments only — shuttle does not rename identifiers).
+`NSITE_MINIFY=0 sbcl --script tools/mksplit.lisp` turns that off when you need to read the bundle
+you are debugging; the artefacts are otherwise identical, and both render pixel-for-pixel the
+same. See *The size, stated plainly* above for what it costs and what is checked.
 
 Four artefacts, and the self-check must read `leftover esm.sh: 0 | import-from-url: 0`:
 

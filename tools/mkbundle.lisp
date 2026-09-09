@@ -15,10 +15,12 @@
 ;;;;
 ;;;;   sbcl --script tools/mkbundle.lisp [out.html]
 ;;;;
-;;;; NOT MINIFIED, deliberately.  esbuild's --minify took the shell from 109 KB to ~36 KB over
-;;;; the wire; this emits every byte.  Correctness first: a minifier is a second implementation
-;;;; of the language's semantics, and the point of the exercise was to stop trusting one we do
-;;;; not own.  The size is a known, stated cost, not an oversight.
+;;;; MINIFIED by default -- whitespace and comments only, no renaming.  Set NSITE_MINIFY=0 to get
+;;;; readable output when debugging the bundle itself.  Renaming is the half that needs a correct
+;;;; model of every scope in the program and fails silently and far away when it is wrong; deleting
+;;;; whitespace is decidable one token pair at a time.  Shuttle verifies it two ways: the output
+;;;; must re-lex to the identical token stream (every build), and it must parse to the identical
+;;;; AST across all 53,000 test262 programs (inspect/minify-gate.lisp).
 
 (require :asdf)
 (let ((here (directory-namestring *load-truename*)))
@@ -33,6 +35,10 @@
     (asdf:load-system "shuttle/bundle")))
 
 (in-package #:shuttle)
+
+(defparameter *minify*
+  (not (equal "0" (or (sb-ext:posix-getenv "NSITE_MINIFY") "1")))
+  "Whitespace/comment minification, on unless NSITE_MINIFY=0.")
 
 (defparameter *repo*
   (namestring (truename (merge-pathnames "../" (directory-namestring *load-truename*)))))
@@ -64,7 +70,7 @@ rewrite mkbundle.py did, for the same reason.")
     (with-open-file (s entry :direction :output :if-exists :supersede :external-format :utf-8)
       (write-string module-src s))
     (unwind-protect
-         (let ((bundle (handler-case (bundle entry :id-root (pathname *repo*))
+         (let ((bundle (handler-case (bundle entry :id-root (pathname *repo*) :minify *minify*)
                          (bundle-error (e)
                            (format *error-output* "~&bundle failed: ~a~%" (bundle-error-text e))
                            (sb-ext:exit :code 1)))))

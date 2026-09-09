@@ -72,6 +72,12 @@
        (if (char= (char (namestring d) (1- (length (namestring d)))) #\/)
            d (concatenate 'string (namestring d) "/"))))))
 
+(defparameter *minify*
+  ;; Whitespace and comments only -- no renaming.  Set NSITE_MINIFY=0 for readable output when
+  ;; debugging the bundle.  It roughly halves the gzipped payload, which is the artefact that
+  ;; actually crosses the data channel to a phone.
+  (not (equal "0" (or (sb-ext:posix-getenv "NSITE_MINIFY") "1"))))
+
 (defparameter *esm-sh-prefix* "https://esm.sh/nostr-tools@2.15.0/")
 (defparameter *placeholder* "<script type=\"module\" src=\"./shell.js\"></script>")
 
@@ -93,7 +99,7 @@ imports and the bare specifiers under vendor/ both resolve from where the real s
     (with-open-file (s entry :direction :output :if-exists :supersede :external-format :utf-8)
       (write-string (replace-all text *esm-sh-prefix* "nostr-tools/") s))
     (unwind-protect
-         (handler-case (bundle entry :id-root (pathname *repo*))
+         (handler-case (bundle entry :id-root (pathname *repo*) :minify *minify*)
            (bundle-error (e)
              (format *error-output* "~&bundling ~a failed: ~a~%" name (bundle-error-text e))
              (sb-ext:exit :code 1)))
