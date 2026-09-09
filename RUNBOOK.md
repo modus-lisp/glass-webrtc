@@ -537,7 +537,7 @@ be reconstructed. `demo/turn-rig/turn-server.py` is a small RFC 5766 server usab
 **Sequence.**
 
 1. Desktop: `NOSTR_SEC=<box> NOSTR_ALLOW=<your npub> cd warren && sbcl --control-stack-size 256 --dynamic-space-size 4096 --load desktop-5903.lisp` — the launcher must load `:glass/nostr` and call `(glass:start-session-nostr)`, or the box has no identity and admits nobody, and should load `:glass/site` so the box publishes its own client (`LOGIN_URL_BASE` is then only a fallback for a box that has never published)
-2. Client: build and publish per `DEPLOY.md` (`mkbundle.py`, then `publish.lisp` **with the file as
+2. Client: build and publish per `DEPLOY.md` (`tools/mkbundle.lisp`, then `publish.lisp` **with the file as
    argv**, then `check-deploy.lisp`) — publish.lisp hands the request to the running desktop, which
    points its own link base at what it just published
 3. Gateway: `./gw-keepalive.sh` under nohup or tmux
@@ -820,7 +820,7 @@ only change that forces a new shell onto nsite.
 
 **Where it lives.** `payload-channel.lisp` (the gateway side), `gateway-nostr.lisp` (**40 added
 lines** — a guarded `load`, a `let` binding, one `cond` clause, one close, one banner line),
-`shell.js` / `payload.js` / `index-shell.html` (the client), `mksplit.py` (the build),
+`shell.js` / `payload.js` / `index-shell.html` (the client), `tools/mksplit.lisp` (the build),
 `payload-channel-test.lisp` (40 assertions, starts no gateway).
 
 **Cost when unused.** Zero, and checkable by reading: with the flag unset the file is never read and

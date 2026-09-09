@@ -8,7 +8,7 @@ else on this page:
 | | source | built by | how a change ships |
 |---|---|---|---|
 | **single page** (deployed today, k39) | `index-nostr.html` | `tools/mkbundle.lisp` | edit → build → **publish under a new tag** → check-deploy → hand out a new URL |
-| **split** (built, tested, **not deployed**) | `index-shell.html` + `shell.js` + `payload.js` | `mksplit.py` | edit `payload.js` → build → `cp payload.js* ` beside the gateway → **the user reloads the same URL** |
+| **split** (built, tested, **not deployed**) | `index-shell.html` + `shell.js` + `payload.js` | `tools/mksplit.lisp` | edit `payload.js` → build → `cp payload.js* ` beside the gateway → **the user reloads the same URL** |
 
 The split exists because the second row is the whole point: four publishes happened in one day
 (k36→k39) and every one of them was a change to code that only matters after the connection is up.
@@ -66,14 +66,13 @@ View only — The desktop client failed to start
 Module name, './novnc/core/rfb.js' does not resolve to a valid URL.
 ```
 
-`mksplit.py` is what produces the servable file: one self-contained bundle with
+`tools/mksplit.lisp` is what produces the servable file: one self-contained bundle with
 noVNC and nostr-tools inlined, roughly twice the size of the source and containing
 no `./novnc/` import at all. That is the difference to check for, and it is what
 `kiln local` now checks at boot before it advertises the channel.
 
 ```sh
-export NSITE_BUILD=/path/to/nsite-build   # node_modules + generated artefacts
-python3 mksplit.py
+sbcl --script tools/mksplit.lisp "$NSITE_BUILD"   # or no argument: ./nsite-build
 cp "$NSITE_BUILD"/payload.js "$HOME"/.kiln/payload.js      # where kiln looks first
 ```
 
@@ -93,9 +92,7 @@ regenerates it automatically. Rebuild it with the recipe above.
 sbcl --script tools/mkbundle.lisp        # writes nsite-index.html beside the source
 ```
 
-**No node, no npm, no esbuild, and nothing fetched** — for the SINGLE-PAGE client. The split
-client (`mksplit.py`, below) still uses the esbuild path; converting it needs the same treatment
-twice plus a gzip, and has not been done. `tools/mkbundle.lisp` does the whole
+**No node, no npm, no esbuild, and nothing fetched.** `tools/mkbundle.lisp` does the whole
 extract → rewrite → bundle → splice with shuttle, whose bundler parses the module graph, resolves
 it against the committed `vendor/`, and prints one script. It rewrites
 `https://esm.sh/nostr-tools@2.15.0/` to a bare specifier (the source imports from a CDN so the
@@ -104,9 +101,23 @@ the output — a surviving one would fetch at runtime, which is the thing bundli
 
 It needs shuttle checked out beside this repo. Nothing else.
 
-`mkbundle.py` is still here and still works if you have npm and esbuild, but it is now the
-LEGACY path: it fetches nothing that `vendor/` does not already hold, and its output is only
-smaller because esbuild minifies. Prefer the Lisp one; it is the one with no dependencies.
+`mkbundle.py` and `mksplit.py` are gone. Both are replaced, and nothing in this repo runs node.
+
+### The size, stated plainly
+
+esbuild minified; these builds do not. Against the same sources:
+
+| artefact | esbuild | shuttle | |
+|---|---|---|---|
+| `nsite-shell.html` | 114 KB | 351 KB | 3.1× |
+| `payload.js` | 266 KB | 786 KB | 3.0× |
+| **`payload.js.gz`** | **82 KB** | **202 KB** | **2.5×** |
+| `standalone.html` | 380 KB | 1.14 MB | 3.0× |
+
+The gzipped payload is the one that matters — it is what crosses the data channel to a phone,
+and it is 120 KB bigger. That is the price of not running a minifier we do not own, and it is a
+real price, not a rounding error. A minifier belongs in the stack eventually; it is a separate
+piece of work with its own oracle, and guessing at it would be worse than paying the bytes.
 
 ### The dependencies are committed
 
@@ -150,7 +161,7 @@ SITE_VERSION=<tag> sbcl --script publish.lisp "$NSITE_BUILD/nsite-index.html"
 ```
 
 **Pass the file path.** `$NSITE_BUILD` means two different things to the two scripts and this is the
-trap: `mkbundle.py` reads it as the build **directory**, `publish.lisp` reads it as the **artefact
+trap: the build scripts read it as the build **directory**, `publish.lisp` reads it as the **artefact
 path** (`*path*` is argv, then `$NSITE_BUILD` verbatim, then `nsite-build/nsite-index.html` beside
 the script). So `NSITE_BUILD=/path/to/nsite-build sbcl --script publish.lisp` hands `read-bytes` a
 directory and dies. Give the file as argv — that is the only form that is right for both scripts.
@@ -408,15 +419,12 @@ noVNC — 61% of the old bundle on its own — never touches nsite again.
 ## Build
 
 ```sh
-export NSITE_BUILD=/path/to/nsite-build     # needs node_modules AND a ./novnc symlink
-python3 mksplit.py
+sbcl --script tools/mksplit.lisp [out-dir]   # default: $NSITE_BUILD, else ./nsite-build
 ```
 
-> **This path still needs npm.** `mksplit.py` builds two bundles with esbuild where
-> `tools/mkbundle.lisp` builds one with shuttle. The dependencies it resolves are the same ones
-> now committed in `vendor/`, so the conversion is mechanical — two bundles instead of one, plus
-> the gzip, which would want `cram` since shuttle has no deflate. Until then this is the one
-> remaining build step that fetches.
+No node, no npm, nothing fetched. `payload.js.gz` is written by `cram` with **mtime 0**, so an
+unchanged payload produces a byte-identical file — the gateway hashes what it reads, and a hash
+that moved because a clock moved would push a pointless transfer to every phone.
 
 Four artefacts, and the self-check must read `leftover esm.sh: 0 | import-from-url: 0`:
 
@@ -437,7 +445,7 @@ This is the entire procedure, and it is the reason the split exists:
 
 ```sh
 $EDITOR payload.js
-python3 mksplit.py
+sbcl --script tools/mksplit.lisp
 cp "$NSITE_BUILD"/payload.js "$NSITE_BUILD"/payload.js.gz  <beside the gateway>
 # ...and the user reloads the SAME url.
 ```
@@ -448,7 +456,7 @@ payload by hash on every connection, sees a hash it does not have, and fetches i
 
 ## Shipping a shell change
 
-Exactly the old procedure — build with `mksplit.py`, publish `nsite-shell.html` under a new tag,
+Exactly the old procedure — build with `tools/mksplit.lisp`, publish `nsite-shell.html` under a new tag,
 check-deploy. **This is what the split is for avoiding**, so the question to ask first is always whether the change can be made in `payload.js`
 instead.
 
@@ -487,7 +495,7 @@ quality ladder and warp panel — so **a fix applied to one does not reach the o
 exactly the complaint this file already makes about `index.html` and `index-ws.html`.
 
 That is tolerable only because it is meant to be temporary. **Once the shell is deployed and has
-run for a while, delete `index-nostr.html` and `mkbundle.py`**: `standalone.html` is the same page,
+run for a while, delete `index-nostr.html` and `tools/mkbundle.lisp`**: `standalone.html` is the same page,
 built from the split sources, so nothing is lost by retiring the monolith. Until then, a change that
 matters to both has to be made in both, and the `.gbtn`/`#mods`/`#warpPanel` CSS lives in
 `payload.js` on one side and in `index-nostr.html`'s `<style>` on the other.
