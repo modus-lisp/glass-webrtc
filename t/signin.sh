@@ -22,24 +22,26 @@ mkdir -p "$out" "$build"
 ln -sfn "$real/node_modules" "$build/node_modules"
 [ -d "$real/novnc" ] && ln -sfn "$real/novnc" "$build/novnc"
 
-esb="$(command -v esbuild || true)"
-if [ -z "$esb" ]; then
-  for c in "$real"/node_modules/esbuild/bin/esbuild \
-           /home/claude/.npm/_npx/*/node_modules/esbuild/bin/esbuild \
-           /home/claude/.npm/_npx/*/node_modules/@esbuild/linux-x64/bin/esbuild; do
-    [ -f "$c" ] && esb="$c" && break
-  done
-fi
-[ -n "$esb" ] || { echo "no esbuild binary found (see DEPLOY.md)"; exit 1; }
+SHUTTLE="${SHUTTLE:-$(command -v shuttle || true)}"
+[ -n "$SHUTTLE" ] || for c in "$real"/../shuttle/bin/shuttle /home/claude/shuttle/bin/shuttle; do
+  [ -x "$c" ] && SHUTTLE="$c" && break
+done
+[ -n "$SHUTTLE" ] || { echo "no shuttle found (expected a sibling ../shuttle checkout)"; exit 1; }
 
-echo "== building the client (the same mksplit.py a publish runs) =="
-NSITE_BUILD="$build" python3 "$src/mksplit.py"
+echo "== building the client (the same tools/mksplit.lisp a publish runs) =="
+NSITE_BUILD="$build" sbcl --script "$src/tools/mksplit.lisp" "$build"
 
+# THE BOX AND THE SIGNER, bundled by shuttle rather than esbuild.  Both were plain IIFEs
+# (--bundle --format=iife --minify), which is shuttle's default output, and the signer additionally
+# wanted --global-name: signer-shim.js is a CLASSIC script, so NSIGNER has to be on the window
+# before the shell's deferred module looks for it.  That is now --global-name here too.
+# BUNDLED IN PLACE, not from the build directory.  Both entries import `nostr-tools/pure`, and a
+# bare specifier resolves by walking UP from the entry looking for vendor/ or node_modules/ -- which
+# finds this repo's vendor/ from t/, and finds nothing at all from a temp build directory.  esbuild
+# happened to resolve it from wherever it was run; shuttle says where it looked, which is how this
+# surfaced at all.
 echo "== bundling the box and the signer =="
-cp "$here/box.entry.mjs" "$here/signer.entry.mjs" "$build/"
-(cd "$build" && "$esb" box.entry.mjs --bundle --format=iife --minify \
-     --platform=browser --outfile=box.js >/dev/null)
-(cd "$build" && "$esb" signer.entry.mjs --bundle --format=iife --global-name=NSIGNER --minify \
-     --platform=browser --outfile=signer.js >/dev/null)
+"$SHUTTLE" bundle "$here/box.entry.mjs" -o "$build/box.js" >/dev/null
+"$SHUTTLE" bundle "$here/signer.entry.mjs" --global-name NSIGNER -o "$build/signer.js" >/dev/null
 
 GLASS_SIGNIN_OUT="$out" python3 "$here/signin.py" "$build"

@@ -74,7 +74,8 @@
 (defparameter *timeout* (or (ignore-errors (parse-integer (or (%env "PUBLISH_TIMEOUT") "300"))) 300))
 
 (unless (probe-file *path*)
-  (format *error-output* "~&publish: no such build: ~a~%  Build it first (python3 mksplit.py), or~@
+  (format *error-output* "~&publish: no such build: ~a~%  Build it first ~
+(sbcl --script tools/mksplit.lisp), or~@
                             ~&  pass the path as argv / $NSITE_BUILD.~%" *path*)
   (finish-output *error-output*)
   (sb-ext:exit :code 2))

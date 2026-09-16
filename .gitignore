@@ -1,3 +1,8 @@
 
 # built by tools/mkbundle.lisp
 .mkbundle-entry.mjs
+
+# THE BUILD OUTPUT DIRECTORY, which is what tools/mksplit.lisp writes and what DEPLOY.md
+# documents as the default.  A generated entry file (shell.entry.mjs, 75 KB) had been committed
+# into it, which is the kind of thing that goes stale silently and then gets published.
+nsite-build/

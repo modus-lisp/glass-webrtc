@@ -185,7 +185,7 @@
 (format t "~&== gzip: preferred when the browser says it can inflate, and only then ==~%")
 ;;; ===========================================================================================
 
-;; The .gz is written by mksplit.py, not here — this file has no deflate either.  A stand-in with
+;; The .gz is written by tools/mksplit.lisp, not here — this file has no deflate either.  A stand-in with
 ;; different bytes is enough to check WHICH FILE is chosen, which is the only decision in the code.
 (write-fixture *fixture-gz* "(this stands in for gzip bytes)")
 (setf *payload-cache* nil)

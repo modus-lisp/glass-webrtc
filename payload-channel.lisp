@@ -31,7 +31,7 @@
 ;;;; Three things that could have lived here deliberately do not:
 ;;;;
 ;;;;   * COMPRESSION.  There is no deflate in this image, and adding one to a process supervised by
-;;;;     a respawn loop is a bad trade for 70 KB.  `mksplit.py` writes `payload.js.gz` at build
+;;;;     a respawn loop is a bad trade for 70 KB.  tools/mksplit.lisp writes `payload.js.gz` at build
 ;;;;     time and this file picks whichever of the two files the browser said it could take.
 ;;;;   * A JSON PARSER.  The one message this channel ever receives is ours and is three fields
 ;;;;     long, so it is scraped, exactly as `handle-control-message` scrapes the control channel.
@@ -121,7 +121,7 @@ PAYLOAD-ON-MESSAGE, which answers `none` so the phone can say so and offer Retry
   (or (uiop:getenv "PAYLOAD_FILE")
       (namestring (merge-pathnames "payload.js"
                                    (or *load-pathname* *default-pathname-defaults*))))
-  "The client payload, as mksplit.py writes it.  `payload.js.gz` beside it is used when the browser
+  "The client payload, as tools/mksplit.lisp writes it.  `payload.js.gz` beside it is used when the browser
 says it can inflate.")
 
 (defparameter *payload-chunk* 16384

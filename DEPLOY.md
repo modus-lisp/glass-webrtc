@@ -25,7 +25,7 @@ Edit `index-nostr.html`. Everything else in that pipeline is generated from it.
 |---|---|---|
 | `index-nostr.html` | **the source.** Both the HTML shell *and* the client script, in one `<script type="module">` | **yes** |
 | `entry.mjs` (build dir) | that script body, extracted, with the `esm.sh` import rewritten to the local package | no — **overwritten on every build** |
-| `bundle.js` (build dir) | `entry.mjs` run through esbuild | no — generated |
+| `bundle.js` (build dir) | `entry.mjs` run through `shuttle bundle` | no — generated |
 | `nsite-index.html` (build dir) | `index-nostr.html` with the bundle spliced back in place of the module body | no — generated |
 | `index.html`, `index-ws.html` | older standalone pages, each with its own hand-copied gesture layer | only for local `gateway.lisp` testing |
 
@@ -110,9 +110,12 @@ Both builds minify by default. `NSITE_MINIFY=0` turns it off when you need to re
 | artefact | esbuild | shuttle, plain | shuttle, minified | |
 |---|---|---|---|---|
 | `nsite-shell.html` | 114 KB | 351 KB | 207 KB | 1.8× esbuild |
-| `payload.js` | 266 KB | 786 KB | 377 KB | 1.4× |
-| **`payload.js.gz`** | **82 KB** | **202 KB** | **101 KB** | **1.2×** |
-| `standalone.html` | 380 KB | 1.14 MB | 584 KB | 1.5× |
+| `payload.js` | 266 KB | 786 KB | 382 KB | 1.4× |
+| **`payload.js.gz`** | **82 KB** | **202 KB** | **103 KB** | **1.3×** |
+| `standalone.html` | 380 KB | 1.14 MB | 589 KB | 1.5× |
+
+(The minified column moves as the client gains code; these are the figures for the build that
+carries the full-screen apps, the visual-viewport geometry and the video pause.)
 
 The gzipped payload is the one that matters — it is what crosses the data channel to a phone.
 Deleting whitespace and comments halves it, and the remaining 19 KB over esbuild is almost
