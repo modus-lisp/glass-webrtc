@@ -241,12 +241,148 @@ one app agreeing about something small.  WARP_FILES_ROOT overrides it."
               (read-line s nil nil)))
        (ignore-errors (sb-bsd-sockets:socket-close sock))))))
 
+(defun %glass-fn (name)
+  "GLASS's NAME, if this image actually has it."
+  (let ((s (find-symbol name "GLASS"))) (and s (fboundp s) s)))
+
+(defun operandi-gui-in-image-p ()
+  "Is the desktop's voice in THIS image, rather than at the end of a socket?
+
+THE COMMENT ABOVE PREDICTED THIS HOST AND THE CODE DID NOT CHECK FOR IT.  The seat socket exists
+because a containerised gateway is a different process from the desktop; kiln is not -- it runs one
+image, no container, and the gateway and glass are the same Lisp.  Worse, the socket it reached for
+was named `seat-0.control' outright, and a kiln session's is `kiln-5.control', so every voice op
+went to a path that does not exist, IGNORE-ERRORS swallowed the failure, and :SPEAKING-P answered
+NIL forever.
+
+That failure is silent by construction and it is worth naming: SPEAK-REPLY waits up to three
+seconds for :SPEAKING-P to go true and then moves on, so the phone lit each sentence in turn, on
+time, with nothing to hear.  A voice that is merely absent looks exactly like a voice that is
+working -- which is why this now asks the image what it can do instead of assuming a topology."
+  (and (%glass-fn "SPEAK") (%glass-fn "SPEAKING-P") t))
+
+(defun operandi-gui-voice-roots ()
+  "Directories that may hold chord voices on this box.
+
+The voice in use is the best clue there is -- a launcher was pointed at it, so its neighbours are
+almost certainly the rest of the set -- and its PARENT is included because chord's exports are one
+directory per voice (export-en_US-joe-medium/en_US-joe-medium.graph), so the siblings are a level
+up.  CHORD_VOICE_DIR and the default under $HOME are added because that is where a fetch puts
+them."
+  (let* ((cur (let ((v (find-symbol "*SPEECH-VOICE*" "GLASS")))
+                (and v (boundp v) (symbol-value v))))
+         (here (and cur (make-pathname :name nil :type nil :version nil :defaults (pathname cur))))
+         (up (and here (make-pathname :directory (butlast (pathname-directory here)))))
+         (env (uiop:getenv "CHORD_VOICE_DIR")))
+    (remove-duplicates
+     (remove nil (list here up
+                       (and env (plusp (length env)) (pathname (concatenate 'string env "/")))
+                       (merge-pathnames ".chord/voices/" (user-homedir-pathname))))
+     :test #'equal)))
+
+(defun operandi-gui-voices ()
+  "Every chord voice this box can find, as a list of (NAME . PATH), the current one first."
+  (let ((cur (let ((v (find-symbol "*SPEECH-VOICE*" "GLASS")))
+               (and v (boundp v) (symbol-value v))))
+        (found '()))
+    (dolist (root (operandi-gui-voice-roots))
+      (dolist (pat (list (merge-pathnames "*.graph" root)
+                         (merge-pathnames "*/*.graph" root)))
+        (dolist (f (ignore-errors (directory pat)))
+          (push (cons (pathname-name f) (namestring f)) found))))
+    (let ((all (remove-duplicates (nreverse found) :key #'car :test #'string=)))
+      (if cur
+          (let ((name (pathname-name (pathname cur))))
+            (cons (cons name cur) (remove name all :key #'car :test #'string=)))
+          all))))
+
+(defun operandi-gui-set-voice (name)
+  "Switch the desktop's voice to NAME (a bare name or a path).  Returns the path, or NIL.
+
+The speaker caches the voice it loaded -- 60 MB, read once -- so changing the variable alone would
+be a setting that takes effect at the next restart and looks broken until then.  Clearing the cache
+makes the NEXT utterance load the new one, which is the same lazy path a first utterance takes.
+HUSH first, because a sentence already in flight belongs to the voice that started it."
+  (let* ((want (string-trim " " (string name)))
+         (hit (or (and (search "/" want) (probe-file want))
+                  (cdr (assoc want (operandi-gui-voices) :test #'string-equal)))))
+    (when hit
+      (let ((var (find-symbol "*SPEECH-VOICE*" "GLASS"))
+            (hush (%glass-fn "HUSH"))
+            (spk (%glass-fn "SESSION-SPEAKER"))
+            (slot (find-symbol "SPK-VOICE" "GLASS")))
+        (when hush (ignore-errors (funcall hush)))
+        (when var (setf (symbol-value var) (namestring hit)))
+        (when (and spk slot (fboundp slot))
+          (ignore-errors (funcall (fdefinition (list 'setf slot)) nil (funcall spk))))
+        (namestring hit)))))
+
+(defun operandi-gui-peer-mic-source ()
+  "A source for the ear that is THE PHONE'S MICROPHONE AND NOTHING ELSE.
+
+An ear with no source named listens to the peer's microphone when one is live and falls back to
+THE SESSION MIX when it is not -- a sensible default for transcribing a desktop, and the wrong one
+for dictation, because the session mix is where the desktop's own voice is.  Tapping dictate opens
+getUserMedia, which takes a moment; a reply being voiced during that moment goes into the mix, the
+ear reads the mix, and the phone is handed a transcript of what the box just said.  That is what
+happened.
+
+So dictation names its source, and the fallback cannot fire.  NIL means `nothing to hear yet',
+which is the source contract and is exactly right here: silence until the microphone is live beats
+transcribing ourselves.  The rate is checked for the same reason the default source checks it --
+a microphone at the wrong rate is not converted here, and confident nonsense is worse than
+silence."
+  (lambda ()
+    (let* ((sm (%glass-fn "SESSION-MIC"))
+           (mic (and sm (funcall sm)))
+           (live (%glass-fn "MIC-LIVE-P"))
+           (rate (%glass-fn "MIC-RATE"))
+           (next (%glass-fn "MIC-NEXT-FRAME"))
+           (want (let ((v (find-symbol "*HEARING-RATE*" "GLASS")))
+                   (and v (boundp v) (symbol-value v)))))
+      (when (and mic live rate next want
+                 (funcall live mic)
+                 (eql (funcall rate mic) want))
+        (funcall next mic)))))
+
 (defun operandi-gui-voice (op &rest args)
-  "The *VOICE* callback operandi-gui/gateway wants: its voice/ear ops, mapped to glass + stave forms
-sent over the seat socket.  :HEARING-TEXT comes back sentence-cased (stave's own recase) and on one
-line (newlines -> spaces, so it survives the socket's read-line)."
-  (ecase op
-    (:speak         (operandi-gui-seat-ctl (format nil "(glass::speak ~s)" (first args))))
+  "The *VOICE* callback operandi-gui/gateway wants: its voice/ear ops, mapped to glass + stave.
+
+IN THIS IMAGE when glass is in it (kiln), over the seat socket when it is not (the container).  The
+two arms mean the same thing; only the distance differs."
+  (if (operandi-gui-in-image-p)
+      (flet ((g (name &rest a)
+               (let ((f (%glass-fn name))) (and f (apply f a)))))
+        (ecase op
+          (:speak         (g "SPEAK" (first args)))
+          (:hush          (g "HUSH"))
+          (:speaking-p    (and (g "SPEAKING-P") t))
+          (:hearing-clear (g "HEARING-CLEAR"))
+          (:voices        (operandi-gui-voices))
+          (:set-voice     (operandi-gui-set-voice (first args)))
+          (:hearing-start (let ((f (%glass-fn "START-LISTENING")))
+                            (and f (funcall f :source (operandi-gui-peer-mic-source)))))
+          (:hearing-stop  (g "STOP-LISTENING"))
+          (:hearing-text
+           (let* ((raw (or (g "HEARING-TEXT") ""))
+                  (cased (let ((f (and (find-package "STAVE")
+                                       (find-symbol "SENTENCE-CASE" "STAVE"))))
+                           (if (and f (fboundp f)) (funcall f raw) raw))))
+             ;; Same shape the socket arm returns: one line, so a caller that reads a line gets
+             ;; all of it.
+             (substitute #\Space #\Newline cased)))))
+      (operandi-gui-voice-over-socket op (first args))))
+
+(defun operandi-gui-voice-over-socket (op &optional arg)
+  "The out-of-image arm: glass + stave forms sent over the seat socket.
+
+:VOICES and :SET-VOICE are in-image only for now -- picking a voice means looking at the desktop's
+filesystem, and that is a different question over a socket.  They answer NIL rather than signalling,
+which the tool reports as `not available here'."
+  (case op
+    ((:voices :set-voice) nil)
+    (t (ecase op
+    (:speak         (operandi-gui-seat-ctl (format nil "(glass::speak ~s)" arg)))
     (:hush          (operandi-gui-seat-ctl "(glass::hush)"))
     (:speaking-p    (let ((r (operandi-gui-seat-ctl "(glass::speaking-p)")))
                       (and r (string/= "NIL" (string-trim '(#\Space #\Newline #\Return #\Tab) r)))))
@@ -254,7 +390,7 @@ line (newlines -> spaces, so it survives the socket's read-line)."
     (:hearing-start (operandi-gui-seat-ctl "(glass::start-listening)"))
     (:hearing-stop  (operandi-gui-seat-ctl "(glass::stop-listening)"))
     (:hearing-text  (operandi-gui-seat-ctl
-                     "(substitute #\\Space #\\Newline (stave:sentence-case (glass::hearing-text)))"))))
+                     "(substitute #\\Space #\\Newline (stave:sentence-case (glass::hearing-text)))"))))))
 
 (defun operandi-gui-ready ()
   "Load :operandi-gui/gateway + ENSURE-READY (agent worker, greeting, chord routing) with this box's

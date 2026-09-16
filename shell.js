@@ -354,10 +354,19 @@ pc.addEventListener('track', (e) => {
   }
   diag('audio track from box (muted)');
   const au = document.createElement('audio'); au.autoplay = true; au.playsInline = true;
-  au.muted = true; au.srcObject = stream;                 // muted: does not take the audio session
+  // MUTED UNLESS SOMEBODY ALREADY ASKED.  Muted is the right default -- it does not take the audio
+  // session -- but the ask can arrive BEFORE the track does, and it did: ticking the chat's
+  // speaker clicks the shell's, which found no element yet, said so into a diagnostics overlay
+  // nobody had open, and dropped the request.  The box then spoke to a muted element for the rest
+  // of the session with every counter on the wire looking healthy.
+  au.muted = !window.__wantSpeaker;
+  au.srcObject = stream;
   document.body.appendChild(au);
   window.__boxAudio = au; window.__boxStream = stream;
   const p = au.play && au.play(); if (p && p.catch) p.catch(() => {});
+  // ...and tell whoever asked that it is here now, so the button can stop lying in the other
+  // direction: it stays struck through until there is something to unmute, then lights itself.
+  window.dispatchEvent(new Event('glass-box-audio'));
 });
 
 // ---- liveness --------------------------------------------------------------------------------

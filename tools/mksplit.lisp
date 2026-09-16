@@ -92,18 +92,47 @@
         do (setf s (concatenate 'string (subseq s 0 p) to (subseq s (+ p (length from))))))
   s)
 
-(defun bundle-source (text name)
+(defun bundle-source (text name &key (format :script))
   "Bundle one module's TEXT.  The entry is written into the REPO ROOT so its own `./novnc/...`
-imports and the bare specifiers under vendor/ both resolve from where the real sources sit."
+imports and the bare specifiers under vendor/ both resolve from where the real sources sit.
+
+FORMAT :MODULE for payload.js, and it is not optional there.  shell.js runs the payload by
+`URL.createObjectURL` + `await import(url)` and then reads `mod.init` and `mod.needs` -- a plain
+IIFE has no exports, so the client loads it, finds nothing, and reports
+`payload exports no init()`.  The shell and the inline entry are spliced into a <script> and want
+the script form."
   (let ((entry (merge-pathnames (format nil ".mksplit-~a.mjs" name) *repo*)))
     (with-open-file (s entry :direction :output :if-exists :supersede :external-format :utf-8)
       (write-string (replace-all text *esm-sh-prefix* "nostr-tools/") s))
     (unwind-protect
-         (handler-case (bundle entry :id-root (pathname *repo*) :minify *minify*)
+         (handler-case (bundle entry :id-root (pathname *repo*) :minify *minify* :format format)
            (bundle-error (e)
              (format *error-output* "~&bundling ~a failed: ~a~%" name (bundle-error-text e))
              (sb-ext:exit :code 1)))
       (ignore-errors (delete-file entry)))))
+
+(defun check-payload-exports (payload-js)
+  "Refuse to write a payload the shell cannot run.
+
+shell.js executes the payload by `URL.createObjectURL` then `await import(url)`, and then reads
+`mod.init` and `mod.needs`.  A bundle in SCRIPT form loads perfectly and exports nothing, so the
+client's only symptom is `payload exports no init()` on a phone -- the build is silent, the
+artefact is the right size, it gunzips, and the page that renders it from disk (standalone.html)
+works, because that path never imports it.  That is exactly how it shipped once.
+
+So the names the shell needs are asserted HERE, where the failure is one line of build output
+instead of a trip through a gateway to a handset."
+  (let ((rec (handler-case (parse-module payload-js)
+               (error (e)
+                 (format *error-output* "~&payload.js does not parse as a module: ~a~%" e)
+                 (sb-ext:exit :code 1)))))
+    (let ((names (remove nil (mapcar #'entry-export-name (module-exports rec)))))
+      (dolist (needed '("init" "needs"))
+        (unless (member needed names :test #'string=)
+          (format *error-output* "~&payload.js exports ~s but the shell requires `~a`.~%  ~
+A SCRIPT-form bundle exports nothing -- build it with :FORMAT :MODULE.~%" names needed)
+          (sb-ext:exit :code 1)))
+      names)))
 
 (defun write-text (name text)
   (let ((path (merge-pathnames name *out-dir*)))
@@ -121,7 +150,9 @@ imports and the bare specifiers under vendor/ both resolve from where the real s
 
 (let* ((page (slurp-file (merge-pathnames "index-shell.html" *repo*)))
        (shell-js (bundle-source (slurp-file (merge-pathnames "shell.js" *repo*)) "shell"))
-       (payload-js (bundle-source (slurp-file (merge-pathnames "payload.js" *repo*)) "payload"))
+       ;; :MODULE -- see BUNDLE-SOURCE.  This artefact is imported, not executed inline.
+       (payload-js (bundle-source (slurp-file (merge-pathnames "payload.js" *repo*)) "payload"
+                                  :format :module))
        (inline-js (bundle-source
                    (format nil "import { init } from './payload.js';~%init(window.__glass);~%")
                    "inline"))
@@ -136,6 +167,8 @@ imports and the bare specifiers under vendor/ both resolve from where the real s
        ;; silently emit latin-1 for anything above U+00FF.
        (raw (sb-ext:string-to-octets payload-js :external-format :utf-8))
        (gz (cram:gzip-compress raw)))
+  (let ((names (check-payload-exports payload-js)))
+    (format t "~&payload exports: ~{~a~^ ~}~%" names))
   (write-text "nsite-shell.html" shell-page)
   (write-text "payload.js" payload-js)
   (with-open-file (s (merge-pathnames "payload.js.gz" *out-dir*)

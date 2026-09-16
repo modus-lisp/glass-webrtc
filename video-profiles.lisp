@@ -51,6 +51,24 @@
 
 (defun control-sid-p (sid) (eql sid +control-stream-id+))
 
+(defvar *video-paused* nil
+  "When true, the capture source reports NOTHING CHANGED and the desktop stops going out.
+
+This is the cheapest thing on the ladder and it is not a rung, because it is not a rate.  A phone
+showing a full-screen app is not looking at the desktop, and a desktop nobody is looking at should
+not be encoded, packetised, sent, decoded or composited -- the saving is the whole pipeline, on
+both ends, not a smaller number of kilobits.
+
+IT WORKS THROUGH THE SOURCE THUNK, which is glass-webrtc's own (see gateway-nostr.lisp): the
+sender already contracts that a source returning NIL means `nothing changed, spend nothing', which
+is exactly the statement a paused desktop wants to make.  So there is no new state in the encoder,
+nothing to keep in step, and a pause cannot desynchronise a stream that is simply not being fed.
+The capture is skipped too, so the box stops reading the framebuffer rather than reading it and
+throwing the result away.
+
+A viewer that pauses and never resumes is a viewer that stopped asking for frames, which is the
+same thing as a closed tab: no timeout is needed, because nothing is being held.")
+
 (defparameter *video-rungs* '(5 16 48 160 480 1600 4800)
   "The ladder, in kilobits per second — 0.625, 2, 6, 20, 60, 200 and 600 kilobytes per second.")
 
@@ -289,6 +307,8 @@ messages are ours, two fields long, and a parser would be the larger thing to tr
                                      (length json)))))
             (when start (parse-integer json :start start :end end :junk-allowed t))))))))
 
+(defun video-paused-p () *video-paused*)
+
 (defun handle-control-message (assoc sid payload)
   "One JSON message from the phone on the control channel.  Always answers with the current state,
 so the phone's stepper shows what the box actually did rather than what was asked for."
@@ -302,6 +322,17 @@ so the phone's stepper shows what the box actually did rather than what was aske
     ;; the blind periodic resync above cannot be removed outright, only made affordable.  iOS
     ;; suspends a backgrounded tab, so the phone misses every frame while it is away and comes back
     ;; holding a reference the encoder has long since predicted past.
+    ;; {"video":0} / {"video":1} -- see *VIDEO-PAUSED*.  Resuming FORCES A KEYFRAME: the phone has
+    ;; been holding a reference frame the encoder has predicted past, and every rule this channel
+    ;; has about stranded decoders applies to a pause exactly as it does to a backgrounded tab.
+    (let ((want (%json-number-value json "video")))
+      (when want
+        (let ((pause (zerop want)))
+          (unless (eq pause *video-paused*)
+            (setf *video-paused* pause)
+            (unless pause (setf webrtc-media:*force-keyframe* t))
+            (format *error-output* "~&[video] ~:[RESUMED by the viewer (keyframe forced)~;PAUSED by the viewer — nothing is being captured or sent~]~%" pause)
+            (finish-output *error-output*)))))
     (let ((req (%json-string-value json "request")))
       (when (equal req "keyframe")
         (setf webrtc-media:*force-keyframe* t)

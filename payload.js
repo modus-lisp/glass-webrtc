@@ -367,15 +367,34 @@ export async function init(api) {
 
        The cap is here in CSS and NOT duplicated in JS -- showApp measures the real rectangle
        rather than recomputing these numbers, so there is one place to change and no drift. */
-    .richPanel{left:50%;right:auto;top:52px;bottom:auto;transform:translateX(-50%);
-      width:min(720px,calc(100vw - 20px));height:min(900px,calc(100vh - 202px))}
-    .richPanel.full{left:0;right:0;top:44px;bottom:0;width:auto;height:auto;transform:none;
+    /* --vv-h / --vv-top ARE THE VISUAL VIEWPORT, published by JS -- see syncVisualViewport.
+       THE KEYBOARD DOES NOT RESIZE THE PAGE.  When it comes up, a mobile browser leaves the layout
+       viewport exactly as tall as it was and SCROLLS it instead, so position:fixed does what it
+       promises and stays fixed -- to a page that is now sliding up behind the keyboard.  100vh is
+       still the whole screen, bottom:0 is still below the keys, and a panel that obeys both is a
+       panel whose lower half you cannot see.  In the chat that is the half with the answer in it.
+
+       So the full-screen geometry is stated against the VISIBLE rectangle rather than the layout
+       one: height, not bottom, because bottom is measured from an edge that is no longer where the
+       screen ends; and a top offset, because the browser has scrolled us.  The fallbacks are the
+       layout viewport, so a browser without visualViewport gets exactly the old behaviour. */
+    /* BORDER-BOX, and it became load-bearing the moment the height stopped being derived.  With
+       top+bottom both set, a border sat INSIDE the rectangle those two edges described; an explicit
+       height is CONTENT height, so the same border started adding 2px and pushing the bottom edge
+       under the keyboard the rule exists to stay above.  Stating the box model is cheaper than
+       hunting the two pixels again. */
+    .richPanel{box-sizing:border-box;
+      left:50%;right:auto;top:calc(var(--vv-top, 0px) + 52px);bottom:auto;
+      transform:translateX(-50%);
+      width:min(720px,calc(100vw - 20px));height:min(900px,calc(var(--vv-h, 100vh) - 202px))}
+    .richPanel.full{left:0;right:0;top:calc(var(--vv-top, 0px) + 44px);bottom:auto;
+      height:calc(var(--vv-h, 100vh) - 44px);width:auto;transform:none;
       border:0;border-radius:0}
 
     /* ---- the switcher: what a full-screen app has instead of an edge -------------------------
        One strip, built from the same richApps list the menu is, so an app is in both or in
        neither.  The desktop is in it, because the desktop is one of them. */
-    #appSwitch{position:fixed;top:0;left:0;right:0;height:44px;z-index:34;display:none;
+    #appSwitch{position:fixed;top:var(--vv-top, 0px);left:0;right:0;height:44px;z-index:34;display:none;
       align-items:center;gap:6px;padding:0 8px;overflow-x:auto;
       background:rgba(8,10,14,.97);border-bottom:1px solid rgba(255,255,255,.12);
       font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
@@ -387,6 +406,17 @@ export async function init(api) {
     #appSwitch button[disabled]{color:#5a646c}
     #appSwitch button[disabled] .sn{text-decoration:line-through}
     #appSwitch .sg{font-size:15px}
+    /* PINNED, because it is the exit.  The strip scrolls and every other chip may leave the
+       screen; the one that closes the app may not.  Sticky rather than a second fixed element, so
+       it keeps the strip's own layout, height and background, and so the chips that scroll do so
+       UNDER it -- which is why it carries the strip's background colour explicitly.
+
+       NO BACKTICKS IN HERE.  This whole stylesheet is one template literal, so a backtick in a
+       comment ENDS IT -- and what follows is then read as code.  Ask how I know. */
+    #appSwitch button.close{position:sticky;left:0;z-index:1;padding:0 14px;
+      background:rgba(8,10,14,.97);box-shadow:6px 0 8px -6px rgba(0,0,0,.85)}
+    #appSwitch button.close .sg{font-size:17px}
+    #appSwitch button.close[aria-current="true"]{background:#2a4a63}
     /* ==== END the app menu's stylesheet ======================================================= */
 `;
   document.head.appendChild(style);
@@ -549,7 +579,28 @@ export async function init(api) {
       else {
         // Nothing has arrived to unmute yet: say so rather than lighting the button green over
         // silence.  The button stays struck through, which is the truth.
-        if (!au) { diag('speaker: no audio from the box yet'); return; }
+        //
+        // BUT THE ASK IS REMEMBERED.  Dropping it meant a tick on the chat's speaker -- which
+        // clicks this button -- was lost whenever the audio track had not landed yet, and the
+        // session then played to a muted element with nothing anywhere saying so.  The flag is
+        // read by the shell when it builds the element, and this lights itself when that happens.
+        if (!au) {
+          window.__wantSpeaker = true;
+          diag('speaker: armed — the box audio has not arrived yet');
+          window.addEventListener('glass-box-audio', () => {
+            const late = window.__boxAudio;
+            if (!late || !window.__wantSpeaker) return;
+            late.muted = false;
+            const q = late.play && late.play(); if (q && q.catch) q.catch(() => {});
+            setBtn(spkBtn, 'on'); showAudio();
+            if (window.__boxStream && !window.__rxMetered) {
+              window.__rxMetered = true; meterStream(window.__boxStream, rxM.set);
+            }
+            diag('speaker on (armed earlier)');
+          }, { once: true });
+          return;
+        }
+        window.__wantSpeaker = true;
         au.muted = false; const p = au.play && au.play(); if (p && p.catch) p.catch(() => {});
         setBtn(spkBtn, 'on'); showAudio();
         if (window.__boxStream && !window.__rxMetered) { window.__rxMetered = true; meterStream(window.__boxStream, rxM.set); }
@@ -1397,7 +1448,11 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     //
     // It has no panel and its show() does nothing, which is exactly right: showing the desktop IS
     // hiding the others, and showApp already does that to every app that is not the target.
-    const DESKTOP = { id: 'desktop', glyph: '▢', name: 'the desktop', served: true, panel: null,
+    // THE DESKTOP'S GLYPH IS AN X, because of where it is read.  In the strip above a full-screen
+    // app, every other chip means "go there" and this one means "leave" — it is the only exit from
+    // a panel that has no edge to tap past.  An icon of a screen would be describing the
+    // destination; the X describes what tapping it DOES, which is the thing a thumb is deciding.
+    const DESKTOP = { id: 'desktop', glyph: '✕', name: 'the desktop', served: true, panel: null,
                       show: () => {} };
     richApps.push(DESKTOP);
     const appsBackdrop = document.createElement('div');
@@ -1408,6 +1463,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
 
     const appsBtn = mkToggle('⊞', 14, 'apps');
     appsBtn.style.left = '14px'; appsBtn.style.right = 'auto'; appsBtn.style.bottom = '78px';
+    setBtn(appsBtn, 'idle');          // MKTOGGLE starts things 'off', and off is struck through
 
     let appOpen = null, appsMenuOn = false;
 
@@ -1415,6 +1471,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     const appSwitch = document.createElement('div');
     appSwitch.id = 'appSwitch';
     document.body.appendChild(appSwitch);
+
 
     const drawSwitch = current => {
       appSwitch.classList.toggle('on', !!current);
@@ -1426,8 +1483,16 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
         b.setAttribute('aria-label', a.name);
         if (a === current) b.setAttribute('aria-current', 'true');
         const g = document.createElement('span'); g.className = 'sg'; g.textContent = a.glyph;
-        const n = document.createElement('span'); n.className = 'sn'; n.textContent = a.name;
-        b.append(g, n);
+        b.appendChild(g);
+        // THE DESKTOP IS A CLOSE BUTTON, not a destination chip.  It carries no name and does not
+        // scroll away with the others: it is the only way out of a panel that has no edge left to
+        // tap past, so it has to be under the thumb whatever the strip has been scrolled to.  The
+        // rest read as "go there"; this one reads as "leave", and a label would argue with that.
+        if (a === DESKTOP) b.classList.add('close');
+        else {
+          const n = document.createElement('span'); n.className = 'sn'; n.textContent = a.name;
+          b.appendChild(n);
+        }
         if (a.served === false) b.disabled = true;
         else b.addEventListener('click', () => showApp(a));
         appSwitch.appendChild(b);
@@ -1456,7 +1521,12 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       panel.classList.remove('full');
       const r = panel.getBoundingClientRect();
       panel.style.display = d; panel.style.visibility = v;
-      return r.width * r.height >= FULL_AT * innerWidth * innerHeight;
+      // Against the VISIBLE rectangle, for the same reason the geometry is: with a keyboard up,
+      // innerHeight is still the whole screen and the fraction would be measured against space the
+      // panel cannot use.
+      const vp = window.visualViewport;
+      const vh = vp ? vp.height : innerHeight, vw = vp ? vp.width : innerWidth;
+      return r.width * r.height >= FULL_AT * vw * vh;
     };
 
     // EXACTLY ONE RICH PANEL IS EVER UP.  Not a rule about screen space — both panels are fixed to
@@ -1470,7 +1540,33 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       for (const b of richApps) if (b.panel) b.panel.classList.toggle('full', full && b === to);
       to.show(true);                          // final geometry already set: one viewport report
       drawSwitch(full ? to : null);
-      setBtn(appsBtn, to === DESKTOP ? 'off' : 'on');
+      // 'idle', NOT 'off'.  OFF means struck through, and the strike says "this is switched off" --
+      // right for the mic, wrong for a menu, which is an ACTION with nothing to be off about.  The
+      // button was wearing a slash the whole time no app was open, i.e. most of the time.
+      setBtn(appsBtn, to === DESKTOP ? 'idle' : 'on');
+      showDesktopVideo(!full);
+    };
+
+    // THE DESKTOP BEHIND A FULL-SCREEN APP IS PAID FOR AND NEVER SEEN.  Covered edge to edge, it
+    // still costs the box a framebuffer read and an encode, the link its bitrate, and the phone a
+    // decode and a composite — on a battery, for pixels behind an opaque panel.  So a full-screen
+    // app turns it OFF at the source and back on when you leave.
+    //
+    // BOTH HALVES, and each is useless without the other: hiding the element alone still pays for
+    // everything up to the compositor, and pausing the sender alone leaves the last frame frozen
+    // under the panel, which looks like a stall the moment anything peeks round it.
+    //
+    // Sent only on a CHANGE.  This runs on every app switch, and a chat->files tap must not put
+    // two more messages on a control channel that already carries the quality ladder.
+    let videoOn = true;
+    const showDesktopVideo = on => {
+      if (on === videoOn) return;
+      videoOn = on;
+      vidEl.style.visibility = on ? '' : 'hidden';
+      if (ctrl && ctrl.readyState === 'open') ctrl.send(JSON.stringify({ video: on ? 1 : 0 }));
+      // The box forces a keyframe when it resumes, so there is nothing to ask for here; it also
+      // means the picture comes back whole rather than as a slow repair of a stale reference.
+      diag('desktop video ' + (on ? 'resumed' : 'paused — full-screen app'));
     };
     // A ROTATION CAN CROSS THE THRESHOLD.  Only the classes are touched here: each app already
     // re-reports its own viewport on resize, and doing it for them would report it twice.
@@ -1479,6 +1575,10 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       const full = wouldFill(appOpen.panel);
       appOpen.panel.classList.toggle('full', full);
       drawSwitch(full ? appOpen : null);
+      // A rotation can cross the threshold in either direction, and the desktop behind has to
+      // follow it -- landscape may give the panel an edge again, and a desktop nobody can see is
+      // exactly as expensive as one they can.
+      showDesktopVideo(!full);
     });
     // Rebuilt on every open rather than kept in step, because it is four elements and the thing it
     // reports — whether an app answered — changes underneath it.
@@ -1487,7 +1587,11 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       const ttl = document.createElement('div');
       ttl.className = 'ttl'; ttl.textContent = 'APPS';
       appsMenu.appendChild(ttl);
+      // NOT THE DESKTOP.  This menu only opens FROM the desktop -- tapping the button puts any
+      // panel away first -- so an entry for "the desktop" is an offer to go where you already are.
+      // It earns its place in the STRIP, where you are somewhere else and it is the way back.
       for (const a of richApps) {
+        if (a === DESKTOP) continue;
         const b = document.createElement('button');
         b.dataset.app = a.id;
         b.setAttribute('aria-label', a.name);
@@ -1518,7 +1622,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       // that puts the list away again, and a modal layer that dims the affordance it belongs to
       // reads as "this button is now unavailable" — the opposite of what it is.
       appsBtn.style.zIndex = on ? '34' : '';
-      setBtn(appsBtn, (on || appOpen) ? 'on' : 'off');
+      setBtn(appsBtn, (on || appOpen) ? 'on' : 'idle');   // see above: a menu has no `off'
     };
     appsBackdrop.addEventListener('click', () => setAppsMenu(false));
     // ONE BUTTON, ONE MEANING: put away whatever rich surface is up, and if none is up, offer the
@@ -2072,6 +2176,13 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
         // the keyboard exactly when it is wanted.  Lift it to sit ON TOP of the keyboard instead,
         // where an accessory row belongs; at rest it drops back above the button row.
         document.documentElement.style.setProperty('--mods-bottom', (up ? lift + 10 : 78) + 'px');
+        // ...and the same measurement, published for the RICH PANELS, which have the identical
+        // problem and had nowhere to read the answer from.  See --vv-h/--vv-top in the app menu's
+        // stylesheet: JS measures, CSS places.  It belongs in this function rather than a second
+        // visualViewport listener because there must be ONE reading of the visible rectangle --
+        // two would be two answers, arriving in whichever order the events happened to fire.
+        document.documentElement.style.setProperty('--vv-h', vv.height + 'px');
+        document.documentElement.style.setProperty('--vv-top', vv.offsetTop + 'px');
         // ...then measure, because the line above is what moved them.  Two frames: the style
         // has to land before getBoundingClientRect means anything.
         // Keyboard up: sit in the space above it, and (see above) DON'T ask the desktop to
@@ -2373,6 +2484,14 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     dbgBtn.dataset.state = 'off';
     dbgBtn.setAttribute('aria-label', 'diagnostics');
     dbgBtn.style.cssText += 'bottom:14px;left:14px;z-index:31;font-size:26px';
+    // HIDDEN, NOT REMOVED.  The diagnostics overlay is the thing you want when the session is
+    // misbehaving, so deleting the way in would be trading a rare need for a permanent one; but it
+    // sat over the chat's input on a phone, and a control you hit by accident while typing is
+    // worse than one you have to ask for.  `localStorage.glassDiag = '1'` brings it back, and the
+    // overlay itself is untouched — this is about the button, not the capability.
+    let dbgWanted = false;
+    try { dbgWanted = localStorage.getItem('glassDiag') === '1'; } catch (_) {}
+    if (!dbgWanted) dbgBtn.style.display = 'none';
     document.body.appendChild(dbgBtn);
     let dbgOn = false;                              // debug overlay hidden by default; ≡ toggles it
     const applyDbg = () => {
@@ -2473,6 +2592,29 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
           const offscreen = vr.width < 2 || vr.height < 2 || vr.right <= 0 || vr.bottom <= 0 ||
                             vr.left >= innerWidth || vr.top >= innerHeight;
           const dark = api.video.presentedAt() && (now - api.video.presentedAt() > 4000);
+          //   * SHAPE.  Frames are arriving, being presented, and in the right BOX -- but the
+          //     picture inside them is the wrong shape, so it is stretched onto a rectangle it
+          //     does not fit.  The reported symptom is a desktop that randomly doubles in width.
+          //
+          // The box only ever downscales by a whole factor (1, 2 or 4) in BOTH axes, so a frame's
+          // aspect always equals the desktop's -- there is no legitimate state in which they
+          // differ, which is what makes this checkable at all rather than a guess about layout.
+          // A decoder holding the wrong dimensions (a keyframe lost across a resolution change
+          // would do it) shows up here and nowhere else: the element is playing, the box is right,
+          // and every other watchdog above is satisfied.
+          //
+          // REPORTS FIRST.  This is an instrument before it is a remedy -- the cause has not been
+          // found, and the numbers it prints are the evidence that would find it.  The keyframe it
+          // asks for is the same cheap remedy the stall case uses, and if it does not help, the
+          // log still says what was wrong.
+          const fbW = () => (typeof rfb !== 'undefined' && rfb && rfb._fbWidth) || 0;
+          const fbH = () => (typeof rfb !== 'undefined' && rfb && rfb._fbHeight) || 0;
+          const shapeWrong = () => {
+            const vw = vidEl.videoWidth, vh = vidEl.videoHeight, fw = fbW(), fh = fbH();
+            if (!vw || !vh || !fw || !fh) return false;
+            const want = fw / fh, got = vw / vh;
+            return Math.abs(got - want) > 0.08 * want;
+          };
           if (videoPrimary && moving && now - lastHeal > 3000) {
             if (vidEl.paused) {
               lastHeal = now;
@@ -2483,6 +2625,16 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
               diag(`no frame presented for ${((now - api.video.presentedAt()) / 1000).toFixed(1)}s ` +
                    `(rs${vidEl.readyState} ${vidEl.videoWidth}x${vidEl.videoHeight}) — play() + resync`);
               api.video.play('stalled', true); syncVideo(); api.video.nudge();
+            } else if (shapeWrong()) {
+              lastHeal = now;
+              const c = document.querySelector('#screen canvas');
+              diag(`SHAPE: video ${vidEl.videoWidth}x${vidEl.videoHeight} does not match the ` +
+                   `desktop ${fbW()}x${fbH()}` +
+                   (c ? ` (canvas ${c.width}x${c.height})` : '') +
+                   ` — keyframe + resync`);
+              if (ctrl && ctrl.readyState === 'open')
+                ctrl.send(JSON.stringify({ request: 'keyframe' }));
+              syncVideo(); api.video.nudge();
             } else if (offscreen && api.video.presented() > 0) {
               lastHeal = now;
               diag(`presenting into an unseeable box ${Math.round(vr.width)}x${Math.round(vr.height)}` +

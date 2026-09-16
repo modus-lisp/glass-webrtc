@@ -741,9 +741,15 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                             ;; encoder measured) and the capture box-filters the desktop down to
                             ;; it.  A source that ignored this would simply never change size,
                             ;; which is the behaviour this had before.
+                            ;; PAUSED MEANS NOT CAPTURED, not captured-and-discarded.  The check
+                            ;; is before CAPTURE-TAKE so a phone showing a full-screen app costs
+                            ;; the box no framebuffer read either -- and NIL is the source
+                            ;; contract's existing word for "nothing changed", so the sender needs
+                            ;; to know nothing about pausing.  See *VIDEO-PAUSED*.
                             :source (when cap
                                       (lambda ()
-                                        (capture-take cap :scale (webrtc-media:video-scale))))
+                                        (unless *video-paused*
+                                          (capture-take cap :scale (webrtc-media:video-scale)))))
                             :on-stats (lambda (v)
                                         (setf *last-video-stats* v)
                                         (write-stats (stats-plist)))
