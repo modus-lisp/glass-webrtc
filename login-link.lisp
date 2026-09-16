@@ -67,6 +67,22 @@
          (cl-nostr.util:bytes->hex (cl-nostr.bech32:npub-decode s)))
         (t (string-downcase s))))
 
+(defun %session-name (pubkey-hex)
+  "The desktop's BIP-39 name, derived from its own pubkey, or NIL if glass is not in this image.
+
+Hex in, bytes out, then GLASS:WORD-NAME -- the SAME function the desktop names itself with, reached
+by FIND-SYMBOL so a script running without glass loaded degrades to no name rather than no link."
+  (let ((wn (let ((p (find-package "GLASS"))) (and p (find-symbol "WORD-NAME" p)))))
+    (when (and wn (fboundp wn))
+      (ignore-errors
+       (funcall wn :words 3
+                :bytes (let* ((n (length pubkey-hex))
+                              (v (make-array (floor n 2) :element-type '(unsigned-byte 8))))
+                         (dotimes (i (length v) v)
+                           (setf (aref v i)
+                                 (parse-integer pubkey-hex :start (* 2 i) :end (+ (* 2 i) 2)
+                                                           :radix 16)))))))))
+
 (let* ((arg (second sb-ext:*posix-argv*))
        ;; 600 s, matching GLASS:*LOGIN-TTL* — a LINK is a credential in transit and its TTL is the
        ;; only bound on a leaked one.  These used to disagree (900 here, 1800 there) with nothing
@@ -75,7 +91,7 @@
   (unless arg
     (format *error-output* "usage: login-link <npub | 64-hex | name@domain> [ttl-seconds]~%")
     (sb-ext:exit :code 1))
-  (handler-case
+(handler-case
       (let* ((target (or (target->hex arg) (error "could not resolve ~a to a pubkey" arg)))
              (box-kp (cl-nostr.keys:keypair-from-secret *box-secret*))
              (box-npub (cl-nostr.bech32:npub-encode (cl-nostr.keys:public-hex box-kp)))
@@ -85,11 +101,23 @@
              (base (or (uiop:getenv "LOGIN_URL_BASE")
                        (format nil "https://~a.nsite.lol/" *site*)))
              (url (format nil "~a#box=~a&code=~a" base box-npub token))
-             (msg (format nil "Your one-time glass desktop link (expires in ~a min):~%~%~a"
-                          (max 1 (round ttl 60)) url))
+             ;; WHICH DESKTOP.  A link on its own says "a glass desktop"; with several running,
+             ;; the one thing the reader needs is which.  It is not passed in and not looked up:
+             ;; THE NAME IS THE PUBKEY, so it is derived here from the key this script already
+             ;; holds -- the same fact the desktop derives its own name from, never stored and so
+             ;; never out of step with it.
+             ;;
+             ;; GLASS:WORD-NAME by FIND-SYMBOL, and no second copy of the BIP-39 list: two lists in
+             ;; two repos is how the name somebody reads off a DM stops matching the name the box
+             ;; says.  Absent, the DM is what it always was rather than wrong.
+             (session-name (%session-name (cl-nostr.keys:public-hex box-kp)))
+             (msg (format nil "Your one-time link to the glass desktop~@[ ~a~] ~
+(expires in ~a min):~%~%~a"
+                          session-name (max 1 (round ttl 60)) url))
              (wrap (cl-nostr.nip59:build-giftwrap box-kp target msg))
              (pool (cl-nostr.pool:make-pool *relays*)))
         (cl-nostr.pool:pool-publish pool wrap)
         (sleep 2)                                   ; let the relays ack before we exit
-        (format t "~&@@ DM'd a one-time login link to ~a…~%@@ ~a~%" (subseq target 0 8) url))
+        (format t "~&@@ DM'd a one-time login link to ~a…~@[ (desktop ~a)~]~%@@ ~a~%"
+                (subseq target 0 8) session-name url))
     (error (e) (format *error-output* "login-link: ~a~%" e) (sb-ext:exit :code 1))))
