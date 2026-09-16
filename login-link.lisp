@@ -9,6 +9,7 @@
 ;;;; hosting nsite with NSITE_NPUB, the relays with NOSTR_RELAYS.
 
 (require :asdf)
+(require :sb-bsd-sockets)
 ;; WHERE QUICKLISP IS.  ~/quicklisp is one machine's answer, not the answer: in a
 ;; container image it is /opt/quicklisp, system-wide, because the desktop runs as a
 ;; user who does not own a home directory worth installing into.  Hardcoding the home
@@ -67,21 +68,65 @@
          (cl-nostr.util:bytes->hex (cl-nostr.bech32:npub-decode s)))
         (t (string-downcase s))))
 
-(defun %session-name (pubkey-hex)
-  "The desktop's BIP-39 name, derived from its own pubkey, or NIL if glass is not in this image.
+(defun %ctl-ask (path form)
+  "Evaluate FORM on a desktop's control socket and return the reply line, or NIL."
+  (ignore-errors
+   (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+     (unwind-protect
+          (progn
+            (sb-bsd-sockets:socket-connect sock (namestring path))
+            (let ((s (sb-bsd-sockets:socket-make-stream sock :input t :output t
+                                                             :element-type 'character)))
+              (write-string form s) (terpri s) (finish-output s)
+              (read-line s nil nil)))
+       (ignore-errors (sb-bsd-sockets:socket-close sock))))))
 
-Hex in, bytes out, then GLASS:WORD-NAME -- the SAME function the desktop names itself with, reached
-by FIND-SYMBOL so a script running without glass loaded degrades to no name rather than no link."
-  (let ((wn (let ((p (find-package "GLASS"))) (and p (find-symbol "WORD-NAME" p)))))
-    (when (and wn (fboundp wn))
-      (ignore-errors
-       (funcall wn :words 3
-                :bytes (let* ((n (length pubkey-hex))
-                              (v (make-array (floor n 2) :element-type '(unsigned-byte 8))))
-                         (dotimes (i (length v) v)
-                           (setf (aref v i)
-                                 (parse-integer pubkey-hex :start (* 2 i) :end (+ (* 2 i) 2)
-                                                           :radix 16)))))))))
+(defun %desktop-name (pubkey-hex)
+  "What the desktop with this key WRITES IN ITS LOWER-LEFT CORNER, or NIL.
+
+NOT DERIVED.  A session's name defaults to BIP-39 words computed from its key, and that is only the
+DEFAULT -- kiln takes --resume=<name> and the sessions on this box include one called `cortez'.  So
+a computed name is a guess that is right until somebody names a desktop, and a DM that confidently
+names the wrong desktop is worse than one that names none.
+
+ASKED, THEN LOOKED UP, AND NEVER GUESSED:
+
+  the live desktop, over its control socket, which is the value GLASS:*DESKTOP-NAME* holds and
+  therefore literally the string WM-DRAW-SESSION-NAME paints on the screen;
+  failing that, the session store, whose DIRECTORY NAME is what kiln resumed and handed to that
+  variable at boot;
+  failing that, NIL, and the DM says what it always said.
+
+The socket is matched by KEY, not by display number: several desktops can be up, and the link is
+for exactly one of them."
+  (let ((want (string-downcase pubkey-hex)))
+    (or
+     ;; 1. ask whoever is running
+     (dolist (ctl (ignore-errors
+                   (directory (merge-pathnames ".glass/run/*.control" (user-homedir-pathname)))))
+       (let* ((r (%ctl-ask ctl
+                           "(let ((s (find-symbol \"*KILN-SESSION-SEC*\" \"CL-USER\")))
+                              (list glass:*desktop-name*
+                                    (and s (boundp s)
+                                         (cl-nostr.keys:public-hex
+                                          (cl-nostr.keys:keypair-from-secret (symbol-value s))))))"))
+              (got (and r (ignore-errors (read-from-string r)))))
+         (when (and (consp got) (stringp (first got)) (stringp (second got))
+                    (string-equal want (second got)))
+           (return (first got)))))
+     ;; 2. the store: a directory per session, named the way the desktop will be
+     (dolist (dir (ignore-errors
+                   (directory (merge-pathnames ".kiln/sessions/*/" (user-homedir-pathname)))))
+       (let* ((nsec (merge-pathnames "nsec" dir))
+              (sec (and (probe-file nsec)
+                        (string-trim '(#\Space #\Newline #\Return #\Tab)
+                                     (uiop:read-file-string nsec))))
+              (hex (and sec (plusp (length sec))
+                        (ignore-errors
+                         (cl-nostr.keys:public-hex
+                          (cl-nostr.keys:keypair-from-secret sec))))))
+         (when (and hex (string-equal want hex))
+           (return (car (last (pathname-directory dir))))))))))
 
 (let* ((arg (second sb-ext:*posix-argv*))
        ;; 600 s, matching GLASS:*LOGIN-TTL* — a LINK is a credential in transit and its TTL is the
@@ -102,15 +147,9 @@ by FIND-SYMBOL so a script running without glass loaded degrades to no name rath
                        (format nil "https://~a.nsite.lol/" *site*)))
              (url (format nil "~a#box=~a&code=~a" base box-npub token))
              ;; WHICH DESKTOP.  A link on its own says "a glass desktop"; with several running,
-             ;; the one thing the reader needs is which.  It is not passed in and not looked up:
-             ;; THE NAME IS THE PUBKEY, so it is derived here from the key this script already
-             ;; holds -- the same fact the desktop derives its own name from, never stored and so
-             ;; never out of step with it.
-             ;;
-             ;; GLASS:WORD-NAME by FIND-SYMBOL, and no second copy of the BIP-39 list: two lists in
-             ;; two repos is how the name somebody reads off a DM stops matching the name the box
-             ;; says.  Absent, the DM is what it always was rather than wrong.
-             (session-name (%session-name (cl-nostr.keys:public-hex box-kp)))
+             ;; the one thing the reader needs is which -- and it must be the name ON THE SCREEN,
+             ;; not a name computed from the key.  See %DESKTOP-NAME.
+             (session-name (%desktop-name (cl-nostr.keys:public-hex box-kp)))
              (msg (format nil "Your one-time link to the glass desktop~@[ ~a~] ~
 (expires in ~a min):~%~%~a"
                           session-name (max 1 (round ttl 60)) url))
