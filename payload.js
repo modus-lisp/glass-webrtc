@@ -1545,6 +1545,28 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       // button was wearing a slash the whole time no app was open, i.e. most of the time.
       setBtn(appsBtn, to === DESKTOP ? 'idle' : 'on');
       showDesktopVideo(!full);
+      rememberApp(to);
+    };
+
+    // WHICH APP YOU WERE IN SURVIVES A RELOAD, because the reload is not usually your idea -- the
+    // session drops, the phone sleeps, the shell reconnects -- and coming back to a desktop you
+    // were not looking at loses your place for no reason you chose.  The hash is the right home
+    // for it: no storage to clear, it travels if the URL is shared, and a hand-typed #app=files
+    // simply works.  REPLACESTATE, not assignment: an app switch is not a navigation, and leaving
+    // history entries behind would make the phone's back gesture walk the app list.
+    const rememberApp = a => {
+      const h = (!a || a === DESKTOP) ? '' : '#app=' + encodeURIComponent(a.id);
+      if (h !== location.hash) {
+        try { history.replaceState(null, '', location.pathname + location.search + h); }
+        catch (_) { location.hash = h; }        // file:// and other places replaceState refuses
+      }
+    };
+
+    const appFromHash = () => {
+      const m = /(?:^|[#&])app=([^&]+)/.exec(location.hash || '');
+      if (!m) return null;
+      const id = decodeURIComponent(m[1]);
+      return richApps.find(a => a.id === id) || null;   // an app that no longer exists = desktop
     };
 
     // THE DESKTOP BEHIND A FULL-SCREEN APP IS PAID FOR AND NEVER SEEN.  Covered edge to edge, it
@@ -1558,16 +1580,37 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     //
     // Sent only on a CHANGE.  This runs on every app switch, and a chat->files tap must not put
     // two more messages on a control channel that already carries the quality ladder.
-    let videoOn = true;
+    // WHAT THE BOX HAS BEEN TOLD, not what we assume it is doing.  This used to start at `true`
+    // and skip the send when the new value matched -- correct while a page lives, wrong the moment
+    // one RELOADS: the box keeps the paused state it was last given, the fresh client believes
+    // video is on, and showing the desktop asks for a change that the guard then swallows.  The
+    // box never resumes and the desktop is black, which is exactly the reported bug.  null means
+    // "the box has not been told anything by THIS page", so the first call always speaks.
+    let videoOn = null;        // last value actually SENT, or null
+    let videoWant = true;      // what this page wants it to be
+    // ...and NOTHING is sent until the restore below has had its say.  A reload into a
+    // full-screen app would otherwise resume the desktop for the instant before the app is put
+    // back, and pause it again: two control messages and a keyframe burst for pixels that were
+    // never going to be seen.  The box is told once, and told the truth.
+    let videoSettled = false;
+    const pushVideoState = () => {
+      if (!videoSettled) return;                         // called again from the restore
+      if (!ctrl || ctrl.readyState !== 'open') return;   // retried from onOpen below
+      if (videoWant === videoOn) return;
+      videoOn = videoWant;
+      ctrl.send(JSON.stringify({ video: videoWant ? 1 : 0 }));
+      diag('desktop video ' + (videoWant ? 'resumed' : 'paused — full-screen app'));
+    };
     const showDesktopVideo = on => {
-      if (on === videoOn) return;
-      videoOn = on;
+      videoWant = on;
       vidEl.style.visibility = on ? '' : 'hidden';
-      if (ctrl && ctrl.readyState === 'open') ctrl.send(JSON.stringify({ video: on ? 1 : 0 }));
+      pushVideoState();
       // The box forces a keyframe when it resumes, so there is nothing to ask for here; it also
       // means the picture comes back whole rather than as a slow repair of a stale reference.
-      diag('desktop video ' + (on ? 'resumed' : 'paused — full-screen app'));
     };
+    // ...and say it again whenever the control channel comes up, because a reconnect is the other
+    // way for the box's state and this page's belief to part company.
+    onOpen(ctrl, pushVideoState);
     // A ROTATION CAN CROSS THE THRESHOLD.  Only the classes are touched here: each app already
     // re-reports its own viewport on resize, and doing it for them would report it twice.
     window.addEventListener('resize', () => {
@@ -1943,6 +1986,15 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // ==== END the file browser ================================================================
 
     mountChat({ warpCh, makeWarpClient, warpSend, richApps, micBtn, spkBtn, isOn, diag });
+
+    // ...and now that every app has registered, go back to the one the URL names.  After
+    // mountChat, because chat pushes itself onto richApps and restoring before it would find the
+    // list short of exactly the app most likely to have been open.  Wrapped because a busted hash
+    // must not take the client down with it: the desktop is always a safe place to land.
+    try { const back = appFromHash(); if (back) showApp(back); } catch (_) {}
+    // Whatever that settled on -- restored app or plain desktop -- is now the truth worth sending.
+    // FINALLY-shaped on purpose: a broken hash must not leave the box's video state unspoken.
+    videoSettled = true; pushVideoState();
 
     const XK = { Enter:0xff0d, Backspace:0xff08, Tab:0xff09, Escape:0xff1b,
                  ArrowLeft:0xff51, ArrowUp:0xff52, ArrowRight:0xff53, ArrowDown:0xff54,
