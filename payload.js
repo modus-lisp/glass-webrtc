@@ -1995,6 +1995,9 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // Whatever that settled on -- restored app or plain desktop -- is now the truth worth sending.
     // FINALLY-shaped on purpose: a broken hash must not leave the box's video state unspoken.
     videoSettled = true; pushVideoState();
+    // The phone's back gesture moves the hash without reloading; follow it rather than stranding
+    // the user on a panel the URL says they left.
+    window.addEventListener('hashchange', () => { showApp(appFromHash() || DESKTOP); });
 
     const XK = { Enter:0xff0d, Backspace:0xff08, Tab:0xff09, Escape:0xff1b,
                  ArrowLeft:0xff51, ArrowUp:0xff52, ArrowRight:0xff53, ArrowDown:0xff54,
