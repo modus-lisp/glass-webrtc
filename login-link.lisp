@@ -61,6 +61,43 @@
     (if e (remove "" (uiop:split-string e :separator ",") :test #'string=)
         '("wss://relay.damus.io" "wss://nos.lol" "wss://relay.primal.net"))))
 
+;; THE RELAY THE LINK CARRIES, as one line: "turn:host:port user pass".  Empty means the link
+;; names no relay and the browser gathers host and server-reflexive candidates only -- the LAN
+;; case works, the symmetric-NAT and cellular cases do not.
+;;
+;; IT GOES IN THE LINK AND NOT IN THE PAGE.  The published client is PUBLIC, and a TURN
+;; credential is a bearer credential: whoever holds it relays on the box's bandwidth until it is
+;; rotated.  The browser must have its ICE servers BEFORE it gathers and sends the offer, and the
+;; offer is the first thing it sends -- so the link's #fragment, which is never sent to a server,
+;; is the only channel that exists that early.
+(defparameter *turn-ice*
+  (let ((e (uiop:getenv "TURN_ICE")))
+    (when (and e (plusp (length (string-trim '(#\Space #\Tab) e))))
+      (let ((f (remove "" (uiop:split-string e :separator '(#\Space #\Tab)) :test #'string=)))
+        (when (>= (length f) 3) (subseq f 0 3))))))
+
+(defun %url-encode (s)
+  "Percent-encode S for a URL fragment.  The fragment is `&'-separated, so a password containing
+`&' would truncate it and silently drop every parameter after it."
+  (with-output-to-string (o)
+    (loop for c across s
+          for n = (char-code c)
+          do (if (or (<= (char-code #\a) n (char-code #\z))
+                     (<= (char-code #\A) n (char-code #\Z))
+                     (<= (char-code #\0) n (char-code #\9))
+                     (find c "-._~"))
+                 (write-char c o)
+                 (format o "%~2,'0X" n)))))
+
+(defun link-fragment (box-npub token)
+  "The `#' fragment a login link carries: the box, the one-time code, and the TURN relay if there
+is one.  Returns it WITHOUT the leading `#'."
+  (with-output-to-string (o)
+    (format o "box=~a&code=~a" box-npub token)
+    (when *turn-ice*
+      (destructuring-bind (srv usr pw) *turn-ice*
+        (format o "&turn=~a&user=~a&pass=~a" (%url-encode srv) (%url-encode usr) (%url-encode pw))))))
+
 (defun target->hex (s)
   "npub / 64-hex / name@domain -> 64-hex pubkey."
   (cond ((cl-nostr.nip05:nip05-address-p s) (cl-nostr.nip05:resolve-pubkey s))
@@ -145,7 +182,7 @@ for exactly one of them."
              ;; nsite gateway's cache catches up); default is the nsite site URL.
              (base (or (uiop:getenv "LOGIN_URL_BASE")
                        (format nil "https://~a.nsite.lol/" *site*)))
-             (url (format nil "~a#box=~a&code=~a" base box-npub token))
+             (url (format nil "~a#~a" base (link-fragment box-npub token)))
              ;; WHICH DESKTOP.  A link on its own says "a glass desktop"; with several running,
              ;; the one thing the reader needs is which -- and it must be the name ON THE SCREEN,
              ;; not a name computed from the key.  See %DESKTOP-NAME.

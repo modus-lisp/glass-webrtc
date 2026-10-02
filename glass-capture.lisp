@@ -202,7 +202,7 @@ active desktop), and on generic arithmetic it was costing ~14% of wall-clock."
                        ;; do it — deliberately, rather than discovering it by decoding rubbish a
                        ;; moment later.
                        ((= e +rfb-desktop-size+)
-                        (error "capture: desktop resized to ~dx~d — reconnecting" rw rh))
+                        (error "capture: desktop resized to ~dx~d" rw rh))
                        ;; An encoding we did not ask for means we can no longer know how many
                        ;; bytes it occupies, so the stream is unparseable from here.  Signal, and
                        ;; let the supervisor reconnect — one strange rect must not end the video.

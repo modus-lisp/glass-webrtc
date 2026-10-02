@@ -269,6 +269,22 @@ re-reads it at the top of every pass — plus the backlog quantizer, which lives
       (finish-output *error-output*)
       p)))
 
+(defun %desktop-width ()
+  "The live desktop's pixel width, or 0 if there is no framebuffer to ask."
+  (or (ignore-errors
+        (let ((fb (funcall (find-symbol "GLASS-PORT-FB" "CLIM-GLASS")
+                           (first (symbol-value (find-symbol "*ALL-PORTS*" "CLIM-INTERNALS"))))))
+          (and fb (funcall (find-symbol "FB-WIDTH" "GLASS") fb))))
+      0))
+
+(defun %desktop-height ()
+  "The live desktop's pixel height, or 0 if there is no framebuffer to ask."
+  (or (ignore-errors
+        (let ((fb (funcall (find-symbol "GLASS-PORT-FB" "CLIM-GLASS")
+                           (first (symbol-value (find-symbol "*ALL-PORTS*" "CLIM-INTERNALS"))))))
+          (and fb (funcall (find-symbol "FB-HEIGHT" "GLASS") fb))))
+      0))
+
 (defun video-profile-status ()
   "The current state, as the JSON the phone paints its stepper from."
   (let* ((kbps (or *video-kbps* (setf *video-kbps* (detect-video-rung))))
@@ -276,14 +292,24 @@ re-reads it at the top of every pass — plus the backlog quantizer, which lives
     ;; ~,0f would emit "55." — a trailing point with no digits, which is not JSON and takes the
     ;; phone's whole status handler down with it.  Every number here is rounded to an integer or
     ;; given explicit decimals.
-    (format nil "{\"kbps\":~a,\"rung\":~a,\"profile\":\"~a kbps\",\"target_kbs\":~,2f,\"target_fps\":~,1f,\"frame_budget\":~a,\"max_frame_kb\":~,1f,\"cleanup_ms\":~a,\"qi\":~a,\"max_qi\":~a,\"motion_qi\":~a,\"key_qi\":~a,\"key_secs\":~a,\"backlog_qi\":~a,\"rungs\":[~{~a~^,~}]}"
+    (format nil "{\"kbps\":~a,\"rung\":~a,\"profile\":\"~a kbps\",\"target_kbs\":~,2f,\"target_fps\":~,1f,\"frame_budget\":~a,\"max_frame_kb\":~,1f,\"cleanup_ms\":~a,\"qi\":~a,\"max_qi\":~a,\"motion_qi\":~a,\"key_qi\":~a,\"key_secs\":~a,\"backlog_qi\":~a,\"desktop_w\":~a,\"desktop_h\":~a,\"rungs\":[~{~a~^,~}]}"
             kbps (or (rung-index kbps) 0) kbps
             (getf p :target-kbs) (getf p :target-fps)
             (round (* (getf p :target-kbs) 1024) (getf p :target-fps))
             (getf p :max-frame-kb) (getf p :cleanup-ms)
             (getf p :qi) (getf p :max-qi) (getf p :motion-qi) (getf p :key-qi)
             (round (getf p :key-secs))
-            (getf p :backlog-qi) *video-rungs*)))
+            (getf p :backlog-qi)
+            ;; THE DESKTOP'S OWN SIZE, so the viewer can RECONCILE rather than only react.  A
+            ;; resize today is edge-triggered -- the browser notices a rotation and asks -- and an
+            ;; ask that is lost or arrives out of order is lost for good, leaving the desktop in a
+            ;; shape nobody is looking at.  With the real size in the state the phone already
+            ;; polls, a viewer can compare what the desktop IS against what it WANTS and close the
+            ;; gap whenever it notices, from any cause.  It cannot read this off the video: the
+            ;; encoder downscales, so a 1468x566 desktop arrives as 366x140 and only the ASPECT
+            ;; survives.
+            (%desktop-width) (%desktop-height)
+            *video-rungs*)))
 
 (defun %json-string-value (json key)
   "The string value of KEY in a flat JSON object, without a JSON parser: these messages are two
@@ -309,6 +335,69 @@ messages are ours, two fields long, and a parser would be the larger thing to tr
 
 (defun video-paused-p () *video-paused*)
 
+;;; ---- tts options: the phone's ⊞ "tts options" panel ----------------------------------------
+;;; {"tts":"get"} asks; {"tts_voice":"NAME"}, {"tts_speed":"1.25"}, {"tts_say":"TEXT"} act.  Every
+;;; one is answered with {"tts":{voice, voices, speed}} -- the state the box is actually in, the
+;;; same rule the rung stepper follows.  glass is reached by name (%GLASS-FN, warp-channel.lisp):
+;;; this file loads without it.
+
+(defun %json-escape (string)
+  (with-output-to-string (o)
+    (loop for c across string
+          do (case c
+               (#\" (write-string "\\\"" o))
+               (#\\ (write-string "\\\\" o))
+               (t (if (< (char-code c) 32) (write-char #\Space o) (write-char c o)))))))
+
+(defun %parse-speed (string)
+  "A decimal like \"1.25\" as a float, or NIL.  Hand-parsed: this is client input and READ is not
+a parser to hand a client."
+  (when (and string (< 0 (length string) 8)
+             (every (lambda (c) (or (digit-char-p c) (char= c #\.))) string)
+             (<= (count #\. string) 1))
+    (let* ((dot (position #\. string))
+           (int (if (and dot (zerop dot)) 0 (parse-integer string :end dot :junk-allowed t)))
+           (frac (if (and dot (< (1+ dot) (length string)))
+                     (/ (parse-integer string :start (1+ dot))
+                        (expt 10 (- (length string) dot 1)))
+                     0)))
+      (and int (float (+ int frac))))))
+
+(defun tts-status (&optional error)
+  (let* ((opts (ignore-errors (let ((f (%glass-fn "SPEECH-OPTIONS"))) (and f (funcall f)))))
+         (voice (getf opts :voice)))
+    (format nil "{\"tts\":{\"available\":~:[false~;true~],\"voice\":~:[null~;\"~:*~a\"~],\"voices\":[~{\"~a\"~^,~}],\"speed\":~,2f~@[,\"error\":\"~a\"~]}}"
+            opts (and voice (%json-escape voice))
+            (mapcar #'%json-escape (getf opts :voices))
+            (or (getf opts :speed) 1)
+            (and error (%json-escape (subseq error 0 (min 200 (length error))))))))
+
+(defun handle-tts-message (json)
+  "Act on any tts_* field in JSON and return the status line to send, or NIL when JSON has none."
+  (let ((ask (%json-string-value json "tts"))
+        (voice (%json-string-value json "tts_voice"))
+        (speed (%json-string-value json "tts_speed"))
+        (say (%json-string-value json "tts_say"))
+        (error nil))
+    (when (or ask voice speed say)
+      (handler-case
+          (progn
+            (when (or voice speed)
+              (let ((choose (%glass-fn "CHOOSE-SPEECH-VOICE")))
+                (when choose
+                  (apply choose (append (when voice (list :voice voice))
+                                        (when speed (list :speed (%parse-speed speed)))))
+                  (format *error-output* "~&[tts] voice ~a speed ~a, chosen by the viewer~%"
+                          (or voice "unchanged") (or speed "unchanged"))
+                  (finish-output *error-output*))))
+            (when (and say (plusp (length say)))
+              (let ((hush (%glass-fn "HUSH")) (speak (%glass-fn "SPEAK")))
+                (when speak
+                  (when hush (funcall hush))
+                  (funcall speak (subseq say 0 (min 300 (length say))))))))
+        (serious-condition (c) (setf error (princ-to-string c))))
+      (tts-status error))))
+
 (defun handle-control-message (assoc sid payload)
   "One JSON message from the phone on the control channel.  Always answers with the current state,
 so the phone's stepper shows what the box actually did rather than what was asked for."
@@ -325,6 +414,21 @@ so the phone's stepper shows what the box actually did rather than what was aske
     ;; {"video":0} / {"video":1} -- see *VIDEO-PAUSED*.  Resuming FORCES A KEYFRAME: the phone has
     ;; been holding a reference frame the encoder has predicted past, and every rule this channel
     ;; has about stranded decoders applies to a pause exactly as it does to a backgrounded tab.
+    ;; {"log":"…"} -- THE PHONE'S OWN VIEW, IN THE BOX'S LOG.  Everything else here is the box
+    ;; telling the phone what it did; this is the one direction that was missing, and its absence
+    ;; is why a rendering fault on the phone could only be debugged by asking the operator what
+    ;; the screen looked like.  The client's geometry -- its viewport, the video's intrinsic size,
+    ;; the box it computed -- is knowable only there, so it has to be said from there.
+    (let ((line (%json-string-value json "log")))
+      (when line
+        (format *error-output* "~&[client] ~a~%"
+                ;; bounded and single-line: this lands in the session log, which is also the
+                ;; operator's window, and a client is not a trusted source of either length or
+                ;; newlines.
+                (let* ((flat (substitute #\Space #\Newline (substitute #\Space #\Return line)))
+                       (cut (if (> (length flat) 300) (subseq flat 0 300) flat)))
+                  cut))
+        (finish-output *error-output*)))
     (let ((want (%json-number-value json "video")))
       (when want
         (let ((pause (zerop want)))
@@ -338,6 +442,8 @@ so the phone's stepper shows what the box actually did rather than what was aske
         (setf webrtc-media:*force-keyframe* t)
         (format *error-output* "~&[video] keyframe requested by the viewer~%")
         (finish-output *error-output*)))
+    (let ((tts (handle-tts-message json)))
+      (when tts (ignore-errors (sctp-send-string assoc sid tts))))
     (ignore-errors (sctp-send-string assoc sid (video-profile-status)))))
 
 ;; Adopt the environment at load time: the sender then starts on exactly the rung the keepalive

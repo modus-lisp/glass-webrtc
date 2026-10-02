@@ -631,6 +631,28 @@ naming it**, never at start, and a failed load is remembered rather than retried
 this box does not serve is *dropped*: the panel says "no answer — this box is not serving the file
 browser", which is a different and more useful claim than an empty tree.
 
+**The media player is a fourth app** — **`warp-media`** (▶ on the phone), a playlist, a transport, a
+clock and a picture. It is the same shape as the file browser: off unless `WARP_MEDIA` is set,
+lazy-loaded at the first message naming it, and refused rather than defaulted when it is off. It is
+the heaviest of the four, because `:warp-media/dom` pulls cassette and reed — the pure-Lisp
+decoders — so a box that is not going to play anything should not pay for them.
+
+**The picture is rule 9's opaque node, and this is the app that makes the rule pay.** The
+framebuffer encoding blits the decoded frame; the DOM encoding beside it cannot, and is not given a
+way to. What arrives is the caption the app supplied — `"clip — 64 x 48, frame 2"` — the dimensions
+and the frame number, in a delta of about 150 bytes. The RGB rides on the domain object and never on
+any wire. So a phone shows a labelled placeholder where the desktop shows a film, and the assertion
+in `two-apps.sh` is that the pixels are *not* there rather than that the caption is.
+
+**The player is shared and so is the folder**, which is rule 8 read exactly: both are arguments to
+the query, so two phones looking at the media panel see one thing playing. The sound goes to the
+desktop's session mixer, where every listener already hears it — the gateway's player is made
+*without* a mixer, because a mixer in the gateway could only ever carry what the gateway itself
+decided to play. The picture still moves: a player with no mixer to feed is paced by the wall clock.
+
+**Where it opens** is `$GLASS_MEDIA`, else the first of `~/Videos`, `~/Music`, `HOME` that exists —
+the same default the desktop's own player uses.
+
 **Where it opens is a default, not a confinement.** This desktop has a terminal in its root menu, so
 anything that reaches the panel already reaches a shell; confining the browser would be theatre. The
 default is `$HOME` — the same place warren's pixel browser opens — and `WARP_FILES_ROOT` overrides

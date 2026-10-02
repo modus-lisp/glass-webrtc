@@ -216,15 +216,48 @@
     window.__glassFbDepth = 16;
     const log = (...a) => console.log('[glass-nostr]', ...a);
 
+    // ---- THE HASH, READ BEFORE ANYTHING THAT NEEDS IT ----------------------------------------
+    // The fragment carries the box, the one-time code, and — since the TURN credential stopped
+    // being published in this file — the relay.  Parsed HERE, above the PeerConnection, because
+    // the ICE list is built from it.  A FRAGMENT IS NEVER SENT TO A SERVER, which is the whole
+    // reason the credential can live here: the page is public, the link is not.
+    const params = new URLSearchParams(location.search);
+    const hraw = location.hash.replace(/^#/, '');
+    const hp = new URLSearchParams(hraw.includes('=') ? hraw : ('box=' + hraw));   // bare npub or box=/code=
+
     // A STUN server so the browser also gathers a server-reflexive (public) candidate for
     // NAT traversal; host candidates still cover the LAN case. Non-trickle: we gather fully
     // (host + srflx) before signaling, since our answer is one-shot.
-    const pc = new RTCPeerConnection({ iceServers: [
+    const iceServers = [
       { urls: 'stun:stun.cloudflare.com:3478' },   // reachable through WARP (WARP is Cloudflare)
       { urls: 'stun:stun.l.google.com:19302' },
-      // TURN relay for the symmetric-NAT / cellular case (coturn behind the frps).
-      { urls: 'turn:turn.ynniv.com:3478', username: 'glass', credential: 'ro0DmshIO9HX7yTiKjWlBkvQalQNkAn' },
-    ] });
+    ];
+    // THE TURN RELAY, FROM THE LINK.  It used to be a literal here — `turn:…' with a static
+    // username and password — and this page is PUBLIC, so the relay's long-term credential was
+    // readable by anyone who fetched it.  A TURN credential is a bearer credential: whoever holds
+    // it relays on the box's bandwidth until it is rotated.
+    //
+    // THE FRAGMENT IS THE ONLY PLACE IT CAN COME FROM: the browser must have its ICE servers
+    // BEFORE it gathers and sends the offer, and the offer is the first thing it sends.
+    //
+    // STORED, because the fragment does not survive the session (the app switcher rewrites the
+    // hash with history.replaceState).  The fragment WINS when present, so a rotated credential
+    // in a fresh link is never shadowed by a stale copy — the rule the one-time code follows.
+    const TURN_KEY = 'glass-turn';
+    const turnFromHash = (() => {
+      const urls = hp.get('turn') || params.get('turn');
+      if (!urls) return null;
+      return { urls,
+               username: hp.get('user') || params.get('user') || undefined,
+               credential: hp.get('pass') || params.get('pass') || undefined };
+    })();
+    if (turnFromHash) { try { localStorage.setItem(TURN_KEY, JSON.stringify(turnFromHash)); } catch (_) {} }
+    const turn = turnFromHash || (() => {
+      try { const s = localStorage.getItem(TURN_KEY); return s ? JSON.parse(s) : null; } catch (_) { return null; }
+    })();
+    if (turn && turn.urls) iceServers.push(turn);
+
+    const pc = new RTCPeerConnection({ iceServers });
     pc.oniceconnectionstatechange = () => log('ice', pc.iceConnectionState);
     pc.onconnectionstatechange = () => log('conn', pc.connectionState);
 
@@ -1255,22 +1288,68 @@ function makeWarpClient(opts) {
 
   let holdTimer = null, held = null, listeners = null;
 
+  // ---- the pan: a finger drag is the two-finger scroll, and it is the SAME verb -----------------
+  //
+  // A wheel is a two-finger pan on a trackpad, and this file has always sent it as one.  A TOUCH
+  // SCREEN HAS NO WHEEL, and the host's stylesheet deliberately gives the browser only the
+  // HORIZONTAL axis (`touch-action: pan-x` on the file browser's rows) because the vertical axis
+  // is not a div to move — a column shows the slice the box sent, and reaching row 40 means asking
+  // for it.  So on a phone nothing produced the gesture at all and the lists would not scroll.
+  //
+  // The fix is not a new verb: it is the same `two-finger` the wheel sends, produced from a drag.
+  // Pixels are accumulated and spent a ROW at a time, because the wire's unit is a row delta and
+  // the server clamps against a row count — sending pixels would scroll 29x too far.  The row
+  // height is MEASURED off a real row rather than assumed, so a stylesheet change cannot silently
+  // desynchronize the two.
+  //
+  // It rides the POINTER events the tap and hold already use, not touch events: one code path for
+  // mouse, pen and finger, and no second set of listeners to keep in step.  A drag past the slop
+  // CANCELS the hold, which is what keeps a scroll from also being a long-press.
+  const SLOP = 8;                       // px of travel that makes a press a drag, not a tap
+  let panId = null, panY = 0, panAcc = 0, panMoved = 0;
+
   function keyAt(ev) {
     const li = ev.target.closest ? ev.target.closest("li[data-key]") : null;
     return li ? li.dataset.key : null;
+  }
+
+  // One row, in pixels, read off the DOM.  Falls back to the host's own 29px row when there is
+  // nothing to measure yet (an empty list, or a panel that has not been laid out).
+  function rowPx() {
+    const li = rowsEl && rowsEl.querySelector ? rowsEl.querySelector("li") : null;
+    const h = li ? li.getBoundingClientRect().height : 0;
+    return h > 4 ? h : 29;
   }
 
   function attachGestures(root) {
     detachGestures();
     const onDown = (ev) => {
       held = keyAt(ev);
+      panId = ev.pointerId; panY = ev.clientY; panAcc = 0; panMoved = 0;
       if (!held) return;
       // press-hold is a TIMING discrimination and it is timed locally, on purpose: 100-300ms of
       // jittery link would make a hold read as a tap if the server tried to time it.
       holdTimer = setTimeout(() => { holdTimer = null; send({t: "gesture", g: "hold", key: held}); },
                              400);
     };
-    const onUp = () => {
+    const onMove = (ev) => {
+      if (panId == null || ev.pointerId !== panId) return;
+      const dy = ev.clientY - panY; panY = ev.clientY;
+      panMoved += Math.abs(dy);
+      if (panMoved > SLOP && holdTimer) {          // a drag is not a hold
+        clearTimeout(holdTimer); holdTimer = null; held = null;
+      }
+      panAcc += dy;
+      const px = rowPx();
+      while (Math.abs(panAcc) >= px) {
+        const d = panAcc > 0 ? 1 : -1;
+        panAcc -= d * px;
+        scroll = Math.max(0, scroll + d);
+        send({t: "gesture", g: "two-finger", dy: d});
+      }
+    };
+    const onUp = (ev) => {
+      if (panId != null && ev.pointerId === panId) panId = null;
       if (holdTimer) {
         clearTimeout(holdTimer); holdTimer = null;
         // A release inside the hold window is a tap.  A release AFTER it lands on whatever is under
@@ -1278,6 +1357,11 @@ function makeWarpClient(opts) {
         // and it needs no verb of its own because menu items are presentations you can tap.
         if (held) send({t: "gesture", g: "tap", key: held});
       }
+      held = null;
+    };
+    const onCancel = (ev) => {                     // the browser took the gesture (a native pan)
+      if (panId != null && ev.pointerId === panId) panId = null;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       held = null;
     };
     const onCtx = (ev) => {                                    // right-click is a hold
@@ -1290,21 +1374,25 @@ function makeWarpClient(opts) {
       send({t: "gesture", g: "two-finger", dy: dy});
     };
     root.addEventListener("pointerdown", onDown);
+    root.addEventListener("pointermove", onMove);
     root.addEventListener("pointerup", onUp);
+    root.addEventListener("pointercancel", onCancel);
     root.addEventListener("contextmenu", onCtx);
     root.addEventListener("wheel", onWheel, {passive: true});
-    listeners = {root, onDown, onUp, onCtx, onWheel};
+    listeners = {root, onDown, onMove, onUp, onCancel, onCtx, onWheel};
   }
 
   function detachGestures() {
     if (!listeners) return;
     const l = listeners; listeners = null;
     l.root.removeEventListener("pointerdown", l.onDown);
+    l.root.removeEventListener("pointermove", l.onMove);
     l.root.removeEventListener("pointerup", l.onUp);
+    l.root.removeEventListener("pointercancel", l.onCancel);
     l.root.removeEventListener("contextmenu", l.onCtx);
     l.root.removeEventListener("wheel", l.onWheel);
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
-    held = null;
+    held = null; panId = null;
   }
 
   return {
@@ -2425,9 +2513,9 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     };
     const setStatus = s => { hud.textContent = s; log(s);
       const i = stepFor[s]; if (i !== undefined) setStep(i); else setConnRaw(s); };
-    const params = new URLSearchParams(location.search);
-    const hraw = location.hash.replace(/^#/, '');
-    const hp = new URLSearchParams(hraw.includes('=') ? hraw : ('box=' + hraw));   // bare npub or box=/code=
+    // `params', `hraw' and `hp' are parsed at the top of this module, above the PeerConnection —
+    // the ICE list is built from the fragment, so the fragment has to be read before the
+    // connection exists.
     // WHICH BOX, remembered.  The magic link carries #box=…&code=…, but the code is short-lived and
     // the box npub never changes — so keeping the box lets a BARE url (…/k28.html, no fragment) find
     // the credentials already in localStorage.  That is what makes a new build reachable without
@@ -2614,8 +2702,9 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       // connect first (fast path) and only fall back to asking for a new link if the box stays
       // silent.  Give up only when there is genuinely nothing to try.
       const showNoCredential = () => {
-        const when = codeExp(code) ? new Date(codeExp(code)) : null;
-        setConnRaw(code ? 'This link has expired' : 'This terminal is not enrolled');
+        const codeDead = Boolean(code) && !codeAlive(code);
+        const when = codeDead && codeExp(code) ? new Date(codeExp(code)) : null;
+        setConnRaw(codeDead ? 'This link has expired' : code ? 'The desktop did not answer' : 'This terminal is not enrolled');
         connMsg.insertAdjacentHTML('afterend',
           '<div style="max-width:22em;font-size:13px;line-height:1.5;opacity:.75;margin-top:2px">' +
           (when ? 'It was valid until ' + when.toLocaleString() + '.<br>' : '') +

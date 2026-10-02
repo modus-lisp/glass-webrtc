@@ -90,15 +90,54 @@ const SHELL_API = 1;
 window.__glassFbDepth = 16;
 const log = (...a) => console.log('[glass-shell]', ...a);
 
+// ---- THE HASH, READ BEFORE ANYTHING THAT NEEDS IT ----------------------------------------------
+// The fragment carries the box, the one-time code, and — since the TURN credential stopped being
+// published in this file — the relay.  It is parsed HERE, above the PeerConnection, because the
+// ICE list is built from it and the PeerConnection is the first thing that needs one.
+//
+// A FRAGMENT IS NEVER SENT TO A SERVER, which is the whole reason the credential can live here:
+// the page is public, the link is not.
+const params = new URLSearchParams(location.search);
+const hraw = location.hash.replace(/^#/, '');
+const hp = new URLSearchParams(hraw.includes('=') ? hraw : ('box=' + hraw));
+
 // A STUN server so the browser also gathers a server-reflexive (public) candidate for NAT
 // traversal; host candidates still cover the LAN case.  Non-trickle: we gather fully before
 // signaling, since our answer is one-shot.
-const pc = new RTCPeerConnection({ iceServers: [
+const iceServers = [
   { urls: 'stun:stun.cloudflare.com:3478' },   // reachable through WARP (WARP is Cloudflare)
   { urls: 'stun:stun.l.google.com:19302' },
-  // TURN relay for the symmetric-NAT / cellular case (coturn behind the frps).
-  { urls: 'turn:turn.ynniv.com:3478', username: 'glass', credential: 'ro0DmshIO9HX7yTiKjWlBkvQalQNkAn' },
-] });
+];
+
+// THE TURN RELAY, FROM THE LINK.  It used to be a literal here — `turn:…' with a static username
+// and password — and this file is published to a PUBLIC page, so the relay's long-term credential
+// was readable by anyone who fetched it.  A TURN credential is a bearer credential: whoever holds
+// it relays on the box's bandwidth until it is rotated.
+//
+// THE FRAGMENT IS THE ONLY PLACE IT CAN COME FROM.  The browser must have its ICE servers BEFORE
+// it gathers and sends the offer, and the offer is the first thing it sends — so the payload
+// (which arrives over the data channel, after the connection is up) and the answer envelope (which
+// comes back after the offer is gone) are both too late.
+//
+// STORED, because the fragment does not survive the session: the payload's app switcher rewrites
+// the hash with history.replaceState, and a reload after that would otherwise lose the relay.  The
+// fragment WINS when present, so a rotated credential in a fresh link is never shadowed by a stale
+// copy — the same rule the one-time code follows.
+const TURN_KEY = 'glass-turn';
+const turnFromHash = (() => {
+  const urls = hp.get('turn') || params.get('turn');
+  if (!urls) return null;
+  return { urls,
+           username: hp.get('user') || params.get('user') || undefined,
+           credential: hp.get('pass') || params.get('pass') || undefined };
+})();
+if (turnFromHash) { try { localStorage.setItem(TURN_KEY, JSON.stringify(turnFromHash)); } catch (_) {} }
+const turn = turnFromHash || (() => {
+  try { const s = localStorage.getItem(TURN_KEY); return s ? JSON.parse(s) : null; } catch (_) { return null; }
+})();
+if (turn && turn.urls) iceServers.push(turn);
+
+const pc = new RTCPeerConnection({ iceServers });
 pc.oniceconnectionstatechange = () => log('ice', pc.iceConnectionState);
 pc.onconnectionstatechange = () => log('conn', pc.connectionState);
 
@@ -168,11 +207,24 @@ const diagEl = document.getElementById('diag');
 diagEl.style.top = '90px';
 const diagLines = [], tStart = performance.now();
 const stamp = () => ((performance.now() - tStart) / 1000).toFixed(1).padStart(5, ' ');
+// MIRROR DIAGNOSTICS TO THE BOX.  The overlay and the console are both on the phone, and the
+// phone is the one place nobody debugging this can see -- every rendering fault so far has been
+// diagnosed by asking the operator to describe the screen.  The control channel already exists and
+// already carries flat JSON, so one more key costs nothing and makes the client's own view land in
+// the session log beside the server's.  Best-effort by construction: before the channel opens, or
+// if it has gone, the line still reaches the overlay.
+function diagUp(line) {
+  try {
+    if (typeof ctrl !== 'undefined' && ctrl && ctrl.readyState === 'open')
+      ctrl.send(JSON.stringify({ log: line }));
+  } catch (_) {}
+}
 function diag(msg) {
   const line = `${stamp()} ${msg}`;
   diagLines.push(line); if (diagLines.length > 60) diagLines.shift();
   diagEl.textContent = diagLines.slice(-20).join('\n');
   console.log('[diag]', line);
+  diagUp(line);
 }
 window.addEventListener('error', e => diag('JS-ERROR ' + (e.message || e.error)));
 window.addEventListener('unhandledrejection', e => diag('REJECT ' + ((e.reason && e.reason.message) || e.reason)));
@@ -278,6 +330,11 @@ const shellGeometry = () => {
   const W = innerWidth, H = innerHeight;
   const s = Math.min(W / vw, H / vh);
   const w = vw * s, h = vh * s;
+  // THE FOUR NUMBERS THAT SETTLE ANY "why does it look like that": what the video actually is,
+  // what the window actually is, and the box chosen from them.  Logged only when one of them
+  // changes, so a resize burst says four lines and a steady screen says none.
+  const shape = `${vw}x${vh} -> win ${W}x${H} -> box ${Math.round(w)}x${Math.round(h)}`;
+  if (shape !== shellGeometry._last) { shellGeometry._last = shape; diag('fit ' + shape); }
   vidEl.style.transform = '';
   vidEl.style.left = Math.round((W - w) / 2) + 'px';
   vidEl.style.top = Math.round((H - h) / 2) + 'px';
@@ -317,7 +374,17 @@ pc.addEventListener('track', (e) => {
     if (videoPrimary) {
       // pointer-events:none is essential — the payload's trackpad listens on #screen BENEATH this
       // element, so without it the video swallows every touch that lands on the desktop.
-      vidEl.style.cssText = 'position:fixed;z-index:5;background:#000;object-fit:fill;' +
+      // CONTAIN, NEVER FILL.  Both the shell's own geometry and the payload's set this
+      // element's BOX, and when the box's aspect matches the video's the two values are
+      // identical -- which is why `fill' looked correct for as long as they agreed.  They
+      // stop agreeing the instant the desktop resizes: the payload glues this element to
+      // noVNC's canvas rect (so touches land where they look), and that rect follows
+      // noVNC's idea of the desktop, which lags the video's actual resolution across a
+      // resize.  With `fill' the picture is then stretched to a box of the wrong shape --
+      // text squeezed to vertical lines, a window drawn tall and thin.  With `contain' the
+      // same disagreement costs a black bar for the frame or two it lasts, and the pixels
+      // stay square.  A wrongly-shaped picture is never the better answer.
+      vidEl.style.cssText = 'position:fixed;z-index:5;background:#000;object-fit:contain;' +
         'pointer-events:none;left:0;top:0;width:1px;height:1px';
       window.__vidEl = vidEl; window.__videoPrimary = true;
       syncVideo();
@@ -340,7 +407,14 @@ pc.addEventListener('track', (e) => {
           connMsg.insertAdjacentHTML('afterend',
             '<div style="max-width:22em;font-size:13px;line-height:1.5;opacity:.75;margin-top:2px">' +
             'The connection did not establish (ICE ' + pc.iceConnectionState + ').<br>' +
-            'Tap ≡ for the log, or reload to try again.</div>');
+            'Reload to try again. The log is below.</div>' +
+            '<pre id="failLog" style="max-width:94vw;max-height:38vh;overflow:auto;text-align:left;' +
+            'font:10px/1.35 ui-monospace,Menlo,monospace;opacity:.8;margin:10px 0 0;white-space:pre-wrap;' +
+            'user-select:text"></pre>');
+          // THE PAYLOAD OWNS THE DEBUG LOG AND THE PAYLOAD NEVER ARRIVED, so a failure that says
+          // "open the log" points at a control that does not exist yet.  Put the log where the error is.
+          const fl = document.getElementById('failLog');
+          if (fl) fl.textContent = diagLines.slice(-30).join('\n');
           failConn();
         }
       }, 12000);
@@ -536,9 +610,8 @@ ch.addEventListener('close', () => diag('datachannel CLOSE'));
 ctrl.addEventListener('open', () => { diag('control channel OPEN'); ctrl.send('{"get":1}'); });
 
 // ---- the box's identity, and which box this is -------------------------------------------------
-const params = new URLSearchParams(location.search);
-const hraw = location.hash.replace(/^#/, '');
-const hp = new URLSearchParams(hraw.includes('=') ? hraw : ('box=' + hraw));
+// `params', `hraw' and `hp' are parsed at the top of this file, above the PeerConnection — the ICE
+// list is built from the fragment, so the fragment has to be read before the connection exists.
 const BOX_KEY = 'glass-box';
 const storeBox = b => { try { localStorage.setItem(BOX_KEY, b); } catch (_) {} };
 const loadBox = () => {
@@ -771,6 +844,13 @@ const api = {
         connEl, connMsg, hud, diagEl, linkEl,
         isConnHidden: () => connHidden, linkState: () => linkState },
   markAlive,
+  // THE PAYLOAD CALLS THIS AND THE SHELL DID NOT PUBLISH IT.  payload.js clears the reconnect
+  // counter on its first presented frame -- "we are up, forget the retries" -- via
+  // api.clearReconnAttempts().  It was a module-local const here, so the call threw
+  // `api.clearReconnAttempts is not a function' EVERY session, inside the first-frame handler and
+  // therefore right where the picture's geometry is first established.  Found only once the
+  // client's own errors were mirrored into the box's log; on the phone it was invisible.
+  clearReconnAttempts,
   scheduleReconnect,
   learnWho,
   // the payload's getStats poll; the shell calls it once a second and on resume
@@ -1101,10 +1181,19 @@ async function makeIdentity() {
   window.__clearWaysBackIn = clearWaysBackIn;
   const showNoCredential = (why, opts) => {
     const pending = Boolean(opts && opts.pending);
-    const when = codeExp(code) ? new Date(codeExp(code))
-                               : (enrolExpiry() ? new Date(enrolExpiry()) : null);
+    // `expired' IS A CLAIM ABOUT THE CLOCK AND IS ONLY MADE WHEN THE CLOCK SAYS SO.  This card is also
+    // reached when a perfectly live code's offer went unanswered (the watchdog below), and it used to
+    // say "This link has expired ... valid until <a time in the future>" for that — a false statement
+    // that hid the real state, which is `the box did not answer'.
+    const codeDead = Boolean(code) && !codeAlive(code);
+    const when = codeDead && codeExp(code) ? new Date(codeExp(code))
+                 : (!code && enrolExpiry() ? new Date(enrolExpiry()) : null);
+    const routes = window.__routes
+      ? ' (' + window.__routes.n + ' routes, ' + window.__routes.relay + ' via relay)' : '';
     if (!pending)
-      setConnRaw(why || (code ? 'This link has expired' : 'This terminal is not enrolled'));
+      setConnRaw(why || (codeDead ? 'This link has expired'
+                         : code ? 'The desktop did not answer'
+                         : 'This terminal is not enrolled'));
     // Rendered fresh each time rather than appended: the watchdog and SCHEDULERECONNECT can both
     // reach this, and a card that grew a second copy of its own advice would read as a bug.
     clearWaysBackIn();
@@ -1116,7 +1205,10 @@ async function makeIdentity() {
       (pending
         ? (when ? 'This browser’s access ran out on ' + when.toLocaleString() + '. Trying it anyway.<br>'
                 : 'This browser’s access may have run out. Trying it anyway.<br>')
-        : (when ? 'It was valid until ' + when.toLocaleString() + '.<br>' : '')) +
+        : (when ? 'It was valid until ' + when.toLocaleString() + '.<br>'
+           : (code && !codeDead
+              ? 'The link is still valid, but nothing answered the offer' + routes + '. The desktop may be offline, or this network may be blocking the route.<br>'
+              : ''))) +
       (signer ? 'Sign in with your Nostr key to enrol this browser again, or DM <b>link</b> to the box for a new one.'
               : 'DM <b>link</b> to the box for a new one.');
     connMsg.insertAdjacentElement('afterend', noCredEl);
@@ -1152,7 +1244,7 @@ async function makeIdentity() {
     }
     if (!pending) failConn();
     diag((pending ? 'enrolment expired — offering the ways back in while we try'
-                  : 'no usable credential') +
+                  : (code && !codeDead ? 'no answer from the box (code still valid)' : 'no usable credential')) +
          (when ? ' (expired ' + when.toISOString() + ')' : '') +
          (signer ? ' — offering the signer' : ' — no signer to offer'));
   };
@@ -1316,6 +1408,7 @@ async function makeIdentity() {
   const nRelay = cands.filter(c => c.includes('relay')).length;
   diag(`offer ${cands.length} cand: ${cands.length - nSrflx - nRelay} host ${nSrflx} srflx ${nRelay} relay`);
   setDetail(0, `${cands.length} routes · ${nRelay} relay`);
+  window.__routes = { n: cands.length, relay: nRelay };
   window.__offerAt = performance.now();
   const payload = JSON.stringify(code ? { sdp: pc.localDescription.sdp, code } : { sdp: pc.localDescription.sdp });
   setStatus(id.mode === 'code' ? 'sending one-time-code offer…' : 'gift-wrapping offer to the box…');

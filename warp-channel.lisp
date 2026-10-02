@@ -213,6 +213,70 @@ one app agreeing about something small.  WARP_FILES_ROOT overrides it."
               (funcall (find-symbol "BROWSE-PROJECTION" "WARP-FILES")
                        (funcall (find-symbol "MAKE-BROWSER" "WARP-FILES")))))))
 
+;;; ---- the media player (client four) — the same shape as the file browser ---------------------
+;;; warp-media is a projection over a folder of files: a playlist, a transport, a clock, and the
+;;; current video frame as rule 9's opaque node.  The framebuffer encoding blits the frame; the DOM
+;;; encoding beside it cannot, and gets the caption instead — which is the facet a phone shows.
+;;;
+;;; THE PLAYER IS SHARED AND SO IS THE FOLDER, which is rule 8 read exactly: both are arguments to
+;;; the query, so two phones looking at the media panel see one thing playing, and the sound goes to
+;;; the desktop's session mixer where every listener already hears it.  A second, private player
+;;; would be a second projection, and nothing here asks for that.
+;;;
+;;; Off unless WARP_MEDIA is set: the player drags in cassette and reed (the decoders), and a box
+;;; that is not going to play anything should not pay for them.
+
+(defparameter *warp-media-enabled* (and (uiop:getenv "WARP_MEDIA") t)
+  "Whether this gateway serves the media player at all.  Off unless WARP_MEDIA is set.")
+
+(defvar *warp-media-loaded* nil "T, NIL, or :FAILED once the load has been tried and lost.")
+(defvar *warp-media-projection* nil
+  "The shared projection — ONE player for the whole box, which is rule 8 read exactly: the player
+and the folder are arguments to the query, so they are shared, and two phones looking at the media
+panel see one thing playing.  A second, private one would be a second projection.")
+
+(defun warp-media-ensure-loaded ()
+  "Load :warp-media/dom, once.  Returns T on success.  Never signals: an app that will not load is
+an app this box does not serve, not a gateway that stops serving the desktop."
+  (case *warp-media-loaded*
+    ((t) t)
+    (:failed nil)
+    (t (handler-case
+           (progn
+             (handler-bind ((warning #'muffle-warning))
+               (let ((*standard-output* (make-broadcast-stream)))
+                 (asdf:load-system "warp-media/dom")))
+             (setf *warp-media-loaded* t))
+         (error (e)
+           (setf *warp-media-loaded* :failed)
+           (format *error-output* "~&[warp] the media player is not available: ~a~%" e)
+           (finish-output *error-output*)
+           nil)))))
+
+(defun warp-media-projection ()
+  "The media player's shared projection, rooted where WARP-MEDIA:DEFAULT-MEDIA-ROOT says.
+
+The player IS put on the desktop's session mixer.  This used to say the opposite — that the mixer
+was a different process and a player in here could only be heard by this gateway — and that was
+never true of kiln: the gateway and glass are the SAME Lisp image, so GLASS:SESSION-MIXER is a
+function call away, and the sound a phone starts here is the sound the desktop's audio stream
+already carries to every listener.  Found by name, like every other glass call in this file, so a
+build without glass still loads and simply plays silently."
+  (bt:with-lock-held (*warp-lock*)
+    (or *warp-media-projection*
+        (setf *warp-media-projection*
+              (funcall (find-symbol "LIBRARY-PROJECTION" "WARP-MEDIA")
+                       (funcall (find-symbol "MAKE-LIBRARY" "WARP-MEDIA")
+                                :mixer (let ((sm (%glass-fn "SESSION-MIXER")))
+                                         (and sm (funcall sm)))
+                                ;; A NAME OF ITS OWN.  The desktop's own Media window puts a
+                                ;; source called "media" on this same session mixer, and
+                                ;; MIXER-ADD-SOURCE does not dedupe by name — it appends.  Two
+                                ;; sources both called "media" would make `mute the media' from a
+                                ;; control socket a coin toss, so the phone's player says which
+                                ;; one it is.
+                                :mixer-name "media-phone"))))))
+
 ;;; ---- the operandi chat (client three) — all the fat lives in :operandi-gui/gateway -----------
 ;;; The chat, its voice (chord out + stave dictation in), and its phone panel are NOT in this file:
 ;;; they are operandi-gui, published at github.com/modus-lisp/operandi-gui.  This box lazy-loads the
@@ -432,6 +496,12 @@ panel says nobody answered, which is the honest report."
            ;; DOM-CONSUMER — and OPEN-CHANNEL takes the function that makes one rather than knowing
            ;; about it
            :attach (fdefinition (find-symbol "ATTACH-DOM" "WARP-FILES-DOM"))))
+    ((and (equal id "media") *warp-media-enabled* (warp-media-ensure-loaded))
+     (list :projection (warp-media-projection)
+           :view (find-symbol "MEDIA-VIEW" "WARP-MEDIA")
+           ;; the player's consumer class is its own — a media layout mixed in FRONT of DOM-CONSUMER
+           ;; — and OPEN-CHANNEL takes the function that makes one rather than knowing about it
+           :attach (fdefinition (find-symbol "ATTACH-DOM" "WARP-MEDIA-DOM"))))
     ((and (equal id "chat") *operandi-gui-enabled* (operandi-gui-ready))
      (funcall (find-symbol "APP-SPEC" "OPERANDI-GUI.GATEWAY")))
     (t nil)))

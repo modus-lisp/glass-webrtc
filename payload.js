@@ -107,7 +107,7 @@ export async function init(api) {
   // dead in the first split build, while mic and speaker — which do not wait on a channel edge —
   // worked.  Anything else that waits on an edge the shell may already have consumed belongs here.
   // The catch-up is DEFERRED, and that is not caution — it is required.  These handlers close over
-  // controls declared further down (`qBtn`, `pasteBtn`), so calling FN synchronously here reaches
+  // controls declared further down (`pasteBtn`), so calling FN synchronously here reaches
   // them in their temporal dead zone and throws.  setTimeout(0) is a macrotask, so it runs after
   // this function's body has finished no matter how many awaits are in it, which is exactly the
   // guarantee "the event would have arrived later" already gave us.
@@ -318,20 +318,98 @@ export async function init(api) {
     #filesNote{padding:8px 12px;color:#8a949c;flex:0 0 auto;
       border-top:1px solid rgba(255,255,255,.08)}
     /* ==== END the file browser's stylesheet ================================================== */
+    /* ==== BEGIN the media player's stylesheet — lifted by warp/t/two-apps.py =================
+       THE THIRD WARP APP, ON THE SAME CHANNEL.  It is a FLAT list like the device manager, so it
+       needs far less than the file browser did — but it is the first app whose rows are not all
+       the same KIND.  The playlist is ENTRY rows (.entry > .n .d), the transport is four BUTTONS
+       (.button.k-*), the scrubber is a row of METER segments (.seg.s-*), and the picture is an
+       OPAQUE node (.opaque > .cap .dim) — all painted by warp/dom/client.js from the widget table,
+       none of it known to this stylesheet beyond the class names.  The one thing this file adds is
+       that the transport and the scrubber read as a CONTROL STRIP rather than as list rows. */
+    #mediaPanel{position:fixed;z-index:23;display:none;
+      flex-direction:column;background:rgba(8,10,14,.93);border:1px solid rgba(255,255,255,.12);
+      border-radius:12px;overflow:hidden;
+      font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#dce4ec}
+    #mediaHead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+      padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.1);color:#8a949c;flex:0 0 auto}
+    #mediaHead b{color:#dce4ec;font-weight:600;letter-spacing:.04em}
+    #mediaBody{flex:1 1 auto;overflow-y:auto;-webkit-overflow-scrolling:touch;position:relative}
+    #mediaRows{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;align-items:stretch}
+    /* THE BANDS ARE SIBLINGS IN ONE LIST, so the strip is made here rather than by a container:
+       an entry row takes the whole width (flex-basis 100%), a control is as wide as its glyph,
+       and a scrubber segment shares what is left.  Without this every band is a block and the
+       transport reads as four stacked rows instead of a control strip. */
+    #mediaRows li{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#161a20;
+      flex:1 1 100%;
+      border-bottom:1px solid #0c0e12;border-left:3px solid transparent;
+      touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+    #mediaRows li.selected{background:#26303c;border-left-color:#5abe82}
+    /* ENTRY ROWS: the playlist.  The tag the app sends (head / dir / track) lands as a class, so
+       the rule down the left says which kind it is without this panel knowing the vocabulary. */
+    #mediaRows li .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #mediaRows li .d{margin-left:auto;color:#6a747c;font-size:10px;flex:0 0 auto}
+    #mediaRows li.entry.dir,#mediaRows li.entry.head,#mediaRows li.entry.up{border-left-color:#9fd8ff}
+    #mediaRows li.entry.track{border-left-color:#5abe82}
+    /* THE TRANSPORT: four buttons in a row, centred, and the now-playing line above them.  The
+       transport row is the fallback widget (.v .l) -- title, clock, state, error -- so it is styled
+       here rather than by a class the client would have to invent. */
+    #mediaRows li.button{display:inline-flex;width:auto;flex:0 0 auto;justify-content:center;
+      padding:10px 18px;background:#12161c;border-left:none;border-bottom:none}
+    #mediaRows li.button .g{font-size:16px;color:#dce4ec;display:inline-flex;align-items:center}
+    #mediaRows li.button.k-toggle .g{color:#5abe82}
+    /* AN ICON IS SIZED IN EM, and this rule is load-bearing rather than cosmetic: the client
+       writes <svg class="icon"> with NO width or height attribute, so without it every control
+       renders 0x0 -- present, tappable, and invisible.  warp/dom/client.html has carried this
+       rule since icons existed; the phone's stylesheet did not, which is why the transport read
+       as four blank rows.  Coloured by currentColor so a kind's colour reaches the path. */
+    #mediaRows li .icon{width:1.15em;height:1.15em;display:block}
+    /* THE SCRUBBER: a row of meter segments, each a tap target.  They sit edge to edge with no
+       gap, so the row reads as one bar rather than as N buttons. */
+    #mediaRows li.seg{flex:1 1 0;min-width:0;padding:0;height:14px;background:#12161c;
+      border-left:none;border-bottom:none;border-right:1px solid #0c0e12}
+    #mediaRows li.seg.s-filled{background:#5abe82}
+    #mediaRows li.seg.s-head{background:#9fd8ff}
+    /* THE PICTURE IS A HOLE AND IS DRAWN AS ONE, exactly as the file browser's preview is: the app
+       said what this region is and this client cannot blit a video frame, so the honest drawing is
+       a labelled placeholder rather than something that looks like content. */
+    #mediaRows .opaque{display:block;background:#12161c;border:1px dashed rgba(255,255,255,.28);
+      border-left:1px dashed rgba(255,255,255,.28);margin:8px;padding:14px 12px;border-radius:8px}
+    #mediaRows .opaque .cap{display:block;color:#dce4ec;margin-bottom:6px;word-break:break-word}
+    #mediaRows .opaque .dim{display:block;color:#8a949c;font-size:10px}
+    #mediaRows .opaque::after{content:'not shown here — this surface cannot blit';display:block;
+      margin-top:8px;color:#5a646c;font-size:10px;font-style:italic}
+    #mediaMenu{list-style:none;margin:0;padding:0;position:absolute;left:12px;right:12px;top:8px;
+      box-shadow:0 10px 30px #000c;border-radius:9px;overflow:hidden}
+    #mediaMenu:empty{display:none}
+    #mediaMenu li{padding:12px 13px;background:#222c38;border-left:3px solid #dce4ec;
+      border-bottom:1px solid #0c0e12;display:flex;gap:10px;touch-action:manipulation}
+    #mediaMenu li.destructive{background:#3a1c1c;border-left-color:#f04646;color:#ffb0b0}
+    #mediaMenu li .c{margin-left:auto;color:#8a949c;font-size:10px}
+    #mediaNote{padding:8px 12px;color:#8a949c;flex:0 0 auto;
+      border-top:1px solid rgba(255,255,255,.08)}
+    /* ==== END the media player's stylesheet ================================================== */
+    /* ==== BEGIN the app menu's stylesheet — lifted by warp/t/two-apps.py ======================
+       ONE BUTTON, AND A LIST OF THE RICH APPS BEHIND IT.  The menu is modal on purpose: the
+       backdrop sits above every button in the page (including the row of buttons at 31) so that while the list is
+       up the only things that can be tapped are an entry and the way out.  A menu you can tap
+       through is a menu that leaves you unsure whether the tap picked something.
+       It is NOT the panels' hold-menu — that one is drawn by warp/dom/client.js from what the
+       server sent and is a different thing entirely.  This one is the page's own furniture and
+       never touches the wire. */
     /* operandi chat stylesheet lives in operandi-gui/client/chat.js now (mountChat injects it) */
     /* ==== BEGIN the app menu's stylesheet — lifted by warp/t/two-apps.py ======================
        ONE BUTTON, AND A LIST OF THE RICH APPS BEHIND IT.  The menu is modal on purpose: the
-       backdrop sits above every button in the page (including ≡ at 31) so that while the list is
+       backdrop sits above every button in the page (including the row of buttons at 31) so that while the list is
        up the only things that can be tapped are an entry and the way out.  A menu you can tap
        through is a menu that leaves you unsure whether the tap picked something.
        It is NOT the panels' hold-menu — that one is drawn by warp/dom/client.js from what the
        server sent and is a different thing entirely.  This one is the page's own furniture and
        never touches the wire. */
     #appsBackdrop{position:fixed;inset:0;z-index:32;display:none;background:rgba(0,0,0,.42)}
-    /* bottom:142 — clear of ⊞ itself, which sits at 78 above ≡ at 14.  The menu opens UPWARD from
+    /* bottom:78 — clear of ⊞ itself, which sits on the bottom row at 14.  The menu opens UPWARD from
        the button that summoned it, which is the direction there is room in on a portrait phone and
        the direction that keeps the thumb off the list it is choosing from. */
-    #appsMenu{position:fixed;left:14px;bottom:142px;z-index:33;display:none;flex-direction:column;
+    #appsMenu{position:fixed;left:14px;bottom:78px;z-index:33;display:none;flex-direction:column;
       min-width:236px;max-width:calc(100vw - 28px);background:rgba(8,10,14,.96);
       border:1px solid rgba(255,255,255,.14);border-radius:12px;overflow:hidden;
       box-shadow:0 12px 34px #000c;
@@ -424,31 +502,49 @@ export async function init(api) {
     // --- two-way audio (G.711/SRTP): level meters + play the box's track ----------------------
     let audioCtx = null;
     const ensureCtx = () => (audioCtx ||= new (window.AudioContext || window.webkitAudioContext)());
-    const mkMeter = (label, color) => {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:7px;font:11px ui-monospace,monospace;color:#cdd6df';
-      const lab = document.createElement('span'); lab.textContent = label; lab.style.cssText = 'width:26px';
-      const bar = document.createElement('div'); bar.style.cssText = 'flex:1;height:8px;border-radius:4px;background:rgba(255,255,255,.14);overflow:hidden';
-      const fill = document.createElement('div'); fill.style.cssText = `height:100%;width:0%;background:${color};transition:width .05s linear`;
-      bar.appendChild(fill); row.append(lab, bar);
-      return { row, set: p => { fill.style.width = Math.max(0, Math.min(100, p * 140)) + '%'; } };
+    // LEVEL METERS ARE ARCS AROUND THE BUTTONS they belong to, symmetric: the level grows UP BOTH
+    // SIDES of a ring from its bottom (6 o'clock), so a louder signal reaches higher on the left and
+    // the right together.  Built inside the button (position:fixed, so the containing block) and
+    // pointer-events:none so it cannot eat a tap.
+    const arcs = [];
+    const mkArc = (btn, color, gain) => {
+      const NS = 'http://www.w3.org/2000/svg', R = 28, HALF = Math.PI * R;   // bottom to top, one side
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('viewBox', '0 0 64 64');
+      svg.style.cssText = 'position:absolute;left:-6px;top:-6px;width:64px;height:64px;' +
+        'pointer-events:none;display:none;overflow:visible';
+      // a half circle from the bottom point to the top, on the right (sweep 0) or left (sweep 1)
+      const half = (sweep, stroke, w) => {
+        const p = document.createElementNS(NS, 'path');
+        p.setAttribute('d', 'M32 60 A28 28 0 0 ' + sweep + ' 32 4');
+        p.setAttribute('fill', 'none'); p.setAttribute('stroke', stroke);
+        p.setAttribute('stroke-width', w); p.setAttribute('stroke-linecap', 'round');
+        svg.appendChild(p); return p;
+      };
+      for (const sw of [0, 1]) half(sw, 'rgba(255,255,255,.14)', 6);
+      const fills = [0, 1].map(sw => { const f = half(sw, color, 6); f.setAttribute('stroke-dasharray', '0 ' + HALF * 2); return f; });
+      btn.appendChild(svg); arcs.push(svg);
+      return { set: p => {
+        const f = Math.max(0, Math.min(1, p * gain)) * HALF;
+        for (const e of fills) e.setAttribute('stroke-dasharray', f + ' ' + HALF * 2); } };
     };
-    const audioPanel = document.createElement('div');
-    // bottom:140 rather than 78 — the modifier row now occupies the strip directly above the
-    // button row, and on a portrait phone a left panel 190px wide reaches into it
-    audioPanel.style.cssText = 'position:fixed;left:14px;bottom:140px;z-index:22;width:190px;display:none;' +
-      'flex-direction:column;gap:6px;background:rgba(0,0,0,.55);padding:9px 11px;border-radius:11px';
-    const txM = mkMeter('mic', '#7CFC9B'), rxM = mkMeter('box', '#8fbaff');
-    audioPanel.append(txM.row, rxM.row); document.body.appendChild(audioPanel);
-    const showAudio = () => { audioPanel.style.display = 'flex'; };
+    // set once the buttons exist, further down
+    let txM = null, rxM = null;
+    const showAudio = () => { for (const a of arcs) a.style.display = 'block'; };
+    // THE METER IS SAMPLED AT ~12 Hz AND SMOOTHED, because a raw per-frame RMS of speech is a
+    // flicker, not a level: it rises quickly (attack) and falls slowly (release), so a syllable
+    // reads as one swell.  The window is 2048 samples, which is ~43 ms at 48 kHz and so also
+    // averages over a pitch period or ten instead of catching one.
     const meterStream = (stream, setter) => {
-      const ctx = ensureCtx(); const an = ctx.createAnalyser(); an.fftSize = 256;
+      const ctx = ensureCtx(); const an = ctx.createAnalyser(); an.fftSize = 2048;
       ctx.createMediaStreamSource(stream).connect(an);
       const buf = new Uint8Array(an.fftSize);
-      const tick = () => { an.getByteTimeDomainData(buf);
+      let level = 0;
+      setInterval(() => { an.getByteTimeDomainData(buf);
         let s = 0; for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
-        setter(Math.sqrt(s / buf.length)); requestAnimationFrame(tick); };
-      tick();
+        const r = Math.sqrt(s / buf.length);
+        level += (r - level) * (r > level ? 0.5 : 0.15);
+        setter(level); }, 80);
     };
 
 
@@ -457,6 +553,7 @@ export async function init(api) {
     // payload does is hand it to noVNC, which rides an RTCDataChannel as its transport directly.
 
     const rfb = new RFB(document.getElementById('screen'), ch, {});
+    window.__rfb = rfb;          // for the size reconciler below, which lives in another scope
     // ASK THE DESKTOP TO BE THIS SIZE, rather than only scaling a picture of one.  noVNC
     // sends SetDesktopSize when the container resizes, glass turns that into a resize of
     // THIS SEAT's screen, and the desktop becomes the shape of the window looking at it —
@@ -494,11 +591,59 @@ export async function init(api) {
       };
       log('resize: asking for', dpr + 'x CSS pixels');
     }
+    // A ROTATION IS NOT ONE RESIZE, IT IS A BURST OF THEM.  The browser reports the viewport
+    // several times while an orientation change settles -- the pre-rotation size, an
+    // intermediate, then the real one -- and noVNC asks the desktop to be each of them in turn.
+    // Whichever lands LAST wins, and it is not reliably the last one reported: measured on this
+    // box, a rotation to portrait went 1468x566 -> 786x1390 and then straight back to 1468x566,
+    // leaving the desktop in the orientation just left.  Rotating again is a coin flip, which is
+    // what made this look intermittent.
+    //
+    // So: after any orientation-ish event, wait for the viewport to STOP changing, then assert
+    // the size once more.  The burst still happens -- noVNC owns that -- but the final word is
+    // always spoken after things have settled, so the desktop cannot be left mid-rotation.
+    if (typeof rfb._requestRemoteResize === 'function') {
+      let settle = null;
+      const reassert = () => {
+        clearTimeout(settle);
+        settle = setTimeout(() => {
+          try { rfb._requestRemoteResize(); log('resize: re-asserted after settle'); }
+          catch (_) {}
+        }, 350);            // long enough for iOS to finish moving the address bar
+      };
+      window.addEventListener('orientationchange', reassert);
+      window.addEventListener('resize', reassert);
+      if (window.visualViewport) window.visualViewport.addEventListener('resize', reassert);
+    }
+
     rfb.focusOnClick = true;
     rfb.showDotCursor = true;      // desktop: draw a dot when the remote cursor is empty, so a
                                    // mouse user is never left with no pointer at all
     rfb.addEventListener('connect', () => { log('RFB connected'); rfb.focus(); });
     rfb.addEventListener('disconnect', e => log('RFB disconnect', e.detail));
+
+    // ---- keep the desktop the shape of the window -------------------------------------------
+    // Idempotent and safe to call as often as the status arrives: it asks only when the two
+    // genuinely differ, and not again for the same target until the request has had time to land.
+    let askedSize = '', askedAt = 0;
+    window.reconcileDesktop = (dw, dh) => {
+      const r = window.__rfb;
+      if (!r || typeof r._requestRemoteResize !== 'function' || typeof r._screenSize !== 'function')
+        return;
+      let want;
+      try { want = r._screenSize(); } catch (_) { return; }
+      if (!want || !want.w || !want.h) return;
+      // the same CSS x DPR the request itself uses -- compare what we would ASK for, not the
+      // CSS size, or the two never agree on a retina phone and this asks forever
+      const dpr = Math.max(1, Math.min(2, Math.round(window.devicePixelRatio || 1)));
+      const ww = Math.round(want.w * dpr), wh = Math.round(want.h * dpr);
+      if (Math.abs(ww - dw) <= 8 && Math.abs(wh - dh) <= 8) { askedSize = ''; return; }
+      const key = ww + 'x' + wh, now = performance.now();
+      if (key === askedSize && now - askedAt < 12000) return;   // already asked; let it arrive
+      askedSize = key; askedAt = now;
+      diag(`reconcile: desktop ${dw}x${dh} but this window wants ${key} — asking`);
+      try { r._requestRemoteResize(); } catch (_) {}
+    };
 
     // ---- REPLAY WHAT ARRIVED BEFORE WE EXISTED -------------------------------------------------
     // glass sends its RFB protocol-version greeting the instant the box bridges this channel, which
@@ -546,13 +691,17 @@ export async function init(api) {
     const setBtn = (b, state) => { b.dataset.state = state; b.disabled = state === 'disabled'; };
     const isOn = b => b.dataset.state === 'on';
     const kbBtn = mkToggle('⌨', 14, 'keyboard');
+    setBtn(kbBtn, 'idle');                          // opens something; it has no off to strike through
     kbBtn.addEventListener('click', () => kbin.focus());
     // the ⌨ is on exactly while the hidden field holds focus, which is exactly while the soft
     // keyboard is up — so the strike is the honest answer to "will typing go anywhere?"
     kbin.addEventListener('focus', () => setBtn(kbBtn, 'on'));
-    kbin.addEventListener('blur', () => setBtn(kbBtn, 'off'));
+    kbin.addEventListener('blur', () => setBtn(kbBtn, 'idle'));
     // --- mic / speaker toggles, both MUTED on load — and now they SAY so ----------------------
     const micBtn = mkToggle('🎙', 74, 'microphone'), spkBtn = mkToggle('🔈', 134, 'desktop sound');
+    // the mic is behind the browser's AGC, which lifts speech to a steady ~0.2 RMS, so it gets far less
+    // gain than the speaker's raw decoded track or its arc would sit near the top whenever you talk
+    txM = mkArc(micBtn, '#7CFC9B', 1.4); rxM = mkArc(spkBtn, '#8fbaff', 1.4);
     // No getUserMedia at all (an insecure origin, an old WebView) is a genuine "you can't",
     // which is a different thing from "off", and used to look identical to it.
     if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) setBtn(micBtn, 'disabled');
@@ -626,7 +775,7 @@ export async function init(api) {
     let QRUNGS = [5, 10, 20, 40, 80, 160, 320];
     let qCurrent = null, qPending = null;
     const qPanel = document.createElement('div');
-    qPanel.style.cssText = 'position:fixed;left:14px;bottom:210px;z-index:22;width:232px;display:none;' +
+    qPanel.style.cssText = 'position:fixed;left:14px;bottom:78px;z-index:22;width:232px;display:none;' +
       'flex-direction:column;gap:6px;background:rgba(0,0,0,.55);padding:9px 11px;border-radius:11px;' +
       'font:11px ui-monospace,monospace;color:#cdd6df;pointer-events:none';
     const qHead = document.createElement('div');
@@ -693,6 +842,13 @@ export async function init(api) {
       // message with its state, so this doubles as the application-level proof of life.
       api.markAlive('control');
       let m = null; try { m = JSON.parse(e.data); } catch (_) { return; }
+      // DECLARATIVE, NOT EDGE-TRIGGERED.  A resize is asked for when the browser notices a
+      // rotation; an ask that is lost, or that lands out of order, is lost for good and the
+      // desktop keeps a shape nobody is looking at -- which is the failure that survived every
+      // edge-triggered fix so far.  The box now reports its real size in this status, which the
+      // phone already polls, so the answer to "is the desktop the shape of this window" can be
+      // asked repeatedly and answered from current facts rather than remembered events.
+      if (m && m.desktop_w > 0 && m.desktop_h > 0) reconcileDesktop(m.desktop_w, m.desktop_h);
       if (!m || m.kbps == null) return;
       if (Array.isArray(m.rungs) && m.rungs.join() !== QRUNGS.join()) { QRUNGS = m.rungs; buildRungs(); }
       qCurrent = m.kbps; qPending = null; paintQ();
@@ -708,20 +864,84 @@ export async function init(api) {
       const rungLine = `rung = ${m.kbps} kbps (${m.target_kbs} KB/s, key qi ${m.key_qi}, resync ${m.key_secs}s)`;
       if (rungLine !== lastRungLine) { lastRungLine = rungLine; diag(rungLine); }
     });
-    onOpen(ctrl, () => { diag('control channel OPEN'); setBtn(qBtn, qOn ? 'on' : 'off');
-                         ctrl.send('{"get":1}'); });
-    // The ladder is the box's to move, so with the control channel shut there is nothing this
-    // button can do — faded, not struck, because the difference matters.
-    ctrl.addEventListener('close', () => { diag('control channel CLOSE');
-      qOn = false; qPanel.style.display = 'none'; setBtn(qBtn, 'disabled'); });
-    // ◈ toggles the panel, like ≡ toggles the debug overlay
-    const qBtn = mkToggle('◈', 194, 'video quality');
-    setBtn(qBtn, 'disabled');                       // until the control channel is actually open
+    onOpen(ctrl, () => { diag('control channel OPEN'); ctrl.send('{"get":1}'); });
+    // The ladder is the box's to move, so with the control channel shut there is nothing the
+    // panel can do: its ⊞ entry is disabled then, and an open panel is put away.
     let qOn = false;
-    qBtn.addEventListener('click', () => {
-      qOn = !qOn; qPanel.style.display = qOn ? 'flex' : 'none'; setBtn(qBtn, qOn ? 'on' : 'off');
-      if (qOn && ctrl.readyState === 'open') ctrl.send('{"get":1}');
+    const setQ = on => {
+      qOn = on && ctrl.readyState === 'open';
+      qPanel.style.display = qOn ? 'flex' : 'none';
+      if (qOn) ctrl.send('{"get":1}');
+      if (qOn && tOn) setT(false);
+      setBtn(appsBtn, (qOn || tOn || appsMenuOn || appOpen) ? 'on' : 'idle');
+    };
+    ctrl.addEventListener('close', () => { diag('control channel CLOSE'); setQ(false); });
+
+    // ==== tts options: the box's voice, chosen from here ====
+    // Same shape as the stream panel and the same rule: every tap is a request, and what the
+    // panel shows is the {"tts":{…}} the box answers with -- the voice it is ACTUALLY using.
+    // The voices are whatever Piper voices are installed on the box (kiln speech fetch adds more).
+    const TTS_SPEEDS = ['0.8', '1', '1.2', '1.4'];
+    let tOn = false, tState = null, tPending = '';
+    const tPanel = document.createElement('div');
+    tPanel.style.cssText = qPanel.style.cssText;
+    const tHead = document.createElement('div'); tHead.style.cssText = qHead.style.cssText;
+    const tTitle = document.createElement('span'); tTitle.textContent = 'tts voice';
+    tHead.append(tTitle);
+    const tVoices = document.createElement('div'); tVoices.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+    const tSpeeds = document.createElement('div'); tSpeeds.style.cssText = 'display:flex;gap:4px';
+    const tNote = document.createElement('div'); tNote.style.cssText = 'color:#8a949c;min-height:1.3em';
+    const tBtn = (label, on, act) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'pointer-events:auto;touch-action:manipulation;flex:1;padding:7px 4px;' +
+        'border-radius:7px;font:11px ui-monospace,monospace;' +
+        (on ? 'border:1px solid #7CFC9B;background:rgba(124,252,155,.16);color:#7CFC9B'
+            : 'border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#8a949c');
+      b.addEventListener('click', e => { e.stopPropagation(); act(); });
+      return b;
+    };
+    const ttsSend = (msg, note) => {
+      if (ctrl.readyState !== 'open') { tNote.textContent = 'control channel ' + ctrl.readyState; return; }
+      ctrl.send(JSON.stringify(msg)); if (note) tNote.textContent = note;
+    };
+    const paintT = () => {
+      tVoices.textContent = ''; tSpeeds.textContent = '';
+      const st = tState;
+      if (!st) { tNote.textContent = 'asking the box…'; return; }
+      if (!st.available) { tNote.textContent = 'no voice engine on the box'; return; }
+      // en_US-lessac-medium -> "lessac (US)": the quality suffix is noise on a phone-width button
+      const short = v => { const m = /^([a-z]{2})_([A-Z]{2})-(.+?)(?:-(?:x_low|low|medium|high))?$/.exec(v);
+                           return m ? `${m[3]} (${m[2]})` : v; };
+      for (const v of (st.voices || []))
+        tVoices.appendChild(tBtn(short(v), v === st.voice,
+          () => { tPending = v; ttsSend({ tts_voice: v }, 'switching to ' + short(v) + '…'); }));
+      if (!(st.voices || []).length) tVoices.textContent = 'none installed — kiln speech fetch voice';
+      for (const sp of TTS_SPEEDS)
+        tSpeeds.appendChild(tBtn(sp + '×', Math.abs((st.speed || 1) - parseFloat(sp)) < 0.01,
+          () => ttsSend({ tts_speed: sp })));
+      const say = tBtn('▶ say something', false,
+        () => ttsSend({ tts_say: 'This is ' + short(st.voice || 'the desktop') + ', speaking at ' +
+                                 (st.speed || 1) + ' times.' }, 'speaking…'));
+      say.style.flex = 'none';
+      tVoices.appendChild(say);
+      tNote.textContent = st.error ? ('box: ' + st.error) : '';
+    };
+    tPanel.append(tHead, tVoices, tSpeeds, tNote); document.body.appendChild(tPanel);
+    ctrl.addEventListener('message', e => {
+      let m = null; try { m = JSON.parse(e.data); } catch (_) { return; }
+      if (!m || !m.tts) return;
+      tState = m.tts;
+      if (tPending && tState.voice === tPending) diag('tts voice -> ' + tPending);
+      tPending = ''; paintT();
     });
+    const setT = on => {
+      tOn = on && ctrl.readyState === 'open';
+      tPanel.style.display = tOn ? 'flex' : 'none';
+      if (tOn) { if (qOn) setQ(false); paintT(); ttsSend({ tts: 'get' }); }
+      setBtn(appsBtn, (qOn || tOn || appsMenuOn || appOpen) ? 'on' : 'idle');
+    };
+    ctrl.addEventListener('close', () => setT(false));
 
     // ==== BEGIN warp/dom/client.js — VERBATIM, checked by warp/t/client-sync.py ====
 // warp/dom/client.js — the DOM encoding's client.  ONE copy, two hosts, no transport.
@@ -1308,22 +1528,68 @@ function makeWarpClient(opts) {
 
   let holdTimer = null, held = null, listeners = null;
 
+  // ---- the pan: a finger drag is the two-finger scroll, and it is the SAME verb -----------------
+  //
+  // A wheel is a two-finger pan on a trackpad, and this file has always sent it as one.  A TOUCH
+  // SCREEN HAS NO WHEEL, and the host's stylesheet deliberately gives the browser only the
+  // HORIZONTAL axis (`touch-action: pan-x` on the file browser's rows) because the vertical axis
+  // is not a div to move — a column shows the slice the box sent, and reaching row 40 means asking
+  // for it.  So on a phone nothing produced the gesture at all and the lists would not scroll.
+  //
+  // The fix is not a new verb: it is the same `two-finger` the wheel sends, produced from a drag.
+  // Pixels are accumulated and spent a ROW at a time, because the wire's unit is a row delta and
+  // the server clamps against a row count — sending pixels would scroll 29x too far.  The row
+  // height is MEASURED off a real row rather than assumed, so a stylesheet change cannot silently
+  // desynchronize the two.
+  //
+  // It rides the POINTER events the tap and hold already use, not touch events: one code path for
+  // mouse, pen and finger, and no second set of listeners to keep in step.  A drag past the slop
+  // CANCELS the hold, which is what keeps a scroll from also being a long-press.
+  const SLOP = 8;                       // px of travel that makes a press a drag, not a tap
+  let panId = null, panY = 0, panAcc = 0, panMoved = 0;
+
   function keyAt(ev) {
     const li = ev.target.closest ? ev.target.closest("li[data-key]") : null;
     return li ? li.dataset.key : null;
+  }
+
+  // One row, in pixels, read off the DOM.  Falls back to the host's own 29px row when there is
+  // nothing to measure yet (an empty list, or a panel that has not been laid out).
+  function rowPx() {
+    const li = rowsEl && rowsEl.querySelector ? rowsEl.querySelector("li") : null;
+    const h = li ? li.getBoundingClientRect().height : 0;
+    return h > 4 ? h : 29;
   }
 
   function attachGestures(root) {
     detachGestures();
     const onDown = (ev) => {
       held = keyAt(ev);
+      panId = ev.pointerId; panY = ev.clientY; panAcc = 0; panMoved = 0;
       if (!held) return;
       // press-hold is a TIMING discrimination and it is timed locally, on purpose: 100-300ms of
       // jittery link would make a hold read as a tap if the server tried to time it.
       holdTimer = setTimeout(() => { holdTimer = null; send({t: "gesture", g: "hold", key: held}); },
                              400);
     };
-    const onUp = () => {
+    const onMove = (ev) => {
+      if (panId == null || ev.pointerId !== panId) return;
+      const dy = ev.clientY - panY; panY = ev.clientY;
+      panMoved += Math.abs(dy);
+      if (panMoved > SLOP && holdTimer) {          // a drag is not a hold
+        clearTimeout(holdTimer); holdTimer = null; held = null;
+      }
+      panAcc += dy;
+      const px = rowPx();
+      while (Math.abs(panAcc) >= px) {
+        const d = panAcc > 0 ? 1 : -1;
+        panAcc -= d * px;
+        scroll = Math.max(0, scroll + d);
+        send({t: "gesture", g: "two-finger", dy: d});
+      }
+    };
+    const onUp = (ev) => {
+      if (panId != null && ev.pointerId === panId) panId = null;
       if (holdTimer) {
         clearTimeout(holdTimer); holdTimer = null;
         // A release inside the hold window is a tap.  A release AFTER it lands on whatever is under
@@ -1331,6 +1597,11 @@ function makeWarpClient(opts) {
         // and it needs no verb of its own because menu items are presentations you can tap.
         if (held) send({t: "gesture", g: "tap", key: held});
       }
+      held = null;
+    };
+    const onCancel = (ev) => {                     // the browser took the gesture (a native pan)
+      if (panId != null && ev.pointerId === panId) panId = null;
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
       held = null;
     };
     const onCtx = (ev) => {                                    // right-click is a hold
@@ -1343,21 +1614,25 @@ function makeWarpClient(opts) {
       send({t: "gesture", g: "two-finger", dy: dy});
     };
     root.addEventListener("pointerdown", onDown);
+    root.addEventListener("pointermove", onMove);
     root.addEventListener("pointerup", onUp);
+    root.addEventListener("pointercancel", onCancel);
     root.addEventListener("contextmenu", onCtx);
     root.addEventListener("wheel", onWheel, {passive: true});
-    listeners = {root, onDown, onUp, onCtx, onWheel};
+    listeners = {root, onDown, onMove, onUp, onCancel, onCtx, onWheel};
   }
 
   function detachGestures() {
     if (!listeners) return;
     const l = listeners; listeners = null;
     l.root.removeEventListener("pointerdown", l.onDown);
+    l.root.removeEventListener("pointermove", l.onMove);
     l.root.removeEventListener("pointerup", l.onUp);
+    l.root.removeEventListener("pointercancel", l.onCancel);
     l.root.removeEventListener("contextmenu", l.onCtx);
     l.root.removeEventListener("wheel", l.onWheel);
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
-    held = null;
+    held = null; panId = null;
   }
 
   return {
@@ -1462,7 +1737,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     document.body.append(appsBackdrop, appsMenu);
 
     const appsBtn = mkToggle('⊞', 14, 'apps');
-    appsBtn.style.left = '14px'; appsBtn.style.right = 'auto'; appsBtn.style.bottom = '78px';
+    appsBtn.style.left = '14px'; appsBtn.style.right = 'auto';   // bottom row, left end (mkToggle's 14px)
     setBtn(appsBtn, 'idle');          // MKTOGGLE starts things 'off', and off is struck through
 
     let appOpen = null, appsMenuOn = false;
@@ -1652,6 +1927,30 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
         }
         appsMenu.appendChild(b);
       }
+      // Not apps: the two things that used to have buttons of their own (◈ and ≡).  They are
+      // for diagnosing a session, so they live in the list rather than in the row you thumb.
+      const tt = document.createElement('div');
+      tt.className = 'ttl'; tt.textContent = 'TOOLS';
+      appsMenu.appendChild(tt);
+      const tool = (id, glyph, name, on, off, act) => {
+        const b = document.createElement('button');
+        b.dataset.app = id; b.setAttribute('aria-label', name);
+        if (on) b.setAttribute('aria-current', 'true');
+        const g = document.createElement('span'); g.className = 'ag'; g.textContent = glyph;
+        const n = document.createElement('span'); n.className = 'an'; n.textContent = name;
+        b.append(g, n);
+        if (off) {
+          b.disabled = true;
+          const w = document.createElement('span'); w.className = 'aw'; w.textContent = off;
+          b.appendChild(w);
+        } else b.addEventListener('click', () => { setAppsMenu(false); act(); });
+        appsMenu.appendChild(b);
+      };
+      tool('stream', '◈', 'stream options', qOn,
+           ctrl.readyState === 'open' ? '' : 'control channel not open', () => setQ(!qOn));
+      tool('tts', '♪', 'tts options', tOn,
+           ctrl.readyState === 'open' ? '' : 'control channel not open', () => setT(!tOn));
+      tool('debug', '≡', 'debug log', dbgOn, '', () => { dbgOn = !dbgOn; applyDbg(); });
     };
     const setAppsMenu = on => {
       appsMenuOn = on;
@@ -1665,7 +1964,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       // that puts the list away again, and a modal layer that dims the affordance it belongs to
       // reads as "this button is now unavailable" — the opposite of what it is.
       appsBtn.style.zIndex = on ? '34' : '';
-      setBtn(appsBtn, (on || appOpen) ? 'on' : 'idle');   // see above: a menu has no `off'
+      setBtn(appsBtn, (on || appOpen || qOn || tOn) ? 'on' : 'idle');   // see above: a menu has no `off'
     };
     appsBackdrop.addEventListener('click', () => setAppsMenu(false));
     // ONE BUTTON, ONE MEANING: put away whatever rich surface is up, and if none is up, offer the
@@ -1674,6 +1973,8 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // doing while you read it.
     appsBtn.addEventListener('click', () => {
       if (appsMenuOn) { setAppsMenu(false); return; }
+      if (qOn) { setQ(false); return; }
+      if (tOn) { setT(false); return; }
       if (appOpen) { showApp(null); return; }
       setAppsMenu(true);
     });
@@ -1984,6 +2285,81 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     });
 
     // ==== END the file browser ================================================================
+
+    // ==== BEGIN the media player — lifted by warp/t/two-apps.py ===============================
+    //
+    // --- ▶ warp's client four, on the SAME data channel as the two above ----------------------
+    //
+    // THE THIRD ENTRY, and the one that proves the registry was worth building: this is a
+    // `richApps.push` and a panel, and nothing about the ⊞ menu changed to admit it.
+    //
+    // IT IS A FLAT LIST, like the device manager and unlike the file browser.  The player's bands —
+    // the picture, the transport, its controls, the playlist — arrive in running order in ONE
+    // container, "rows", because a browser lays them out itself and the server sends no geometry.
+    // The picture is rule 9's opaque node: this client cannot blit a video frame and is not going
+    // to be given a way to, so it draws the caption the app supplied ("Big Buck Bunny — 640 x 360,
+    // frame 812") in a box.  The transport and the scrubber are buttons and a meter, which the
+    // client already knows how to paint — the media types map onto those kinds in the widget table.
+    const mediaPanel = document.createElement('div');
+    mediaPanel.id = 'mediaPanel';
+    mediaPanel.classList.add('richPanel');
+    mediaPanel.innerHTML =
+      '<div id="mediaHead"><b>media</b><span id="mediaStat">—</span></div>' +
+      '<div id="mediaBody"><ul id="mediaRows"></ul><ul id="mediaMenu"></ul></div>' +
+      '<div id="mediaNote"></div>';
+    document.body.appendChild(mediaPanel);
+    const mediaStat = mediaPanel.querySelector('#mediaStat');
+    const mediaNote = mediaPanel.querySelector('#mediaNote');
+    const mediaRowsEl = mediaPanel.querySelector('#mediaRows');
+
+    const mediaFit = () => Math.max(4, Math.floor((mediaRowsEl.clientHeight || 360) / 29));
+
+    const media = makeWarpClient({
+      app: 'media',                       // the label on this app's frames, both ways
+      rows: mediaRowsEl,
+      menu: mediaPanel.querySelector('#mediaMenu'),
+      viewportRows: 12,
+      send: warpSend,                     // one link, and it is the panels above's
+      onStat: s => {
+        mediaStat.textContent = s.nodes + ' rows · ' + s.bytes + ' B';
+        if (s.deltas) mediaNote.textContent = '';
+      }
+    });
+    media.attachGestures(mediaPanel);
+    warpCh.addEventListener('message', e => media.apply(e.data));
+    warpCh.addEventListener('close', () => {
+      media.reset(); mediaSpoke = false; mediaApp.served = null;
+      mediaStat.textContent = '—'; mediaNote.textContent = 'channel closed';
+    });
+
+    let mediaOn = false, mediaSpoke = false;
+    const mediaApp = {
+      id: 'media', glyph: '▶', name: 'media', served: null, panel: mediaPanel,
+      show: on => {
+        mediaOn = on;
+        mediaPanel.style.display = on ? 'flex' : 'none';
+        if (!on) return;
+        media.viewport(mediaFit(), 0);
+        if (!mediaSpoke) {
+          mediaSpoke = true;
+          mediaNote.textContent = 'asking the box…';
+          diag('warp media: hello on stream 102');
+          // A box serving the device manager and not the media player is an ordinary state — the
+          // app is opt-in on the gateway (WARP_MEDIA) — so this says which thing is missing rather
+          // than showing an empty playlist, which would read as "your media folder is empty".
+          setTimeout(() => {
+            if (mediaOn && media.stats().frames === 0) {
+              mediaNote.textContent = 'no answer — this box is not serving the media player';
+              mediaApp.served = false;
+              diag('warp media: no answer from the box');
+            }
+          }, 5000);
+        }
+      }
+    };
+    richApps.push(mediaApp);
+    window.addEventListener('resize', () => { if (mediaOn) media.viewport(mediaFit(), 0); });
+    // ==== END the media player ================================================================
 
     mountChat({ warpCh, makeWarpClient, warpSend, richApps, micBtn, spkBtn, isOn, diag });
 
@@ -2313,6 +2689,14 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       window.__vidXform = () => ({ zoom, tx, ty });
       const syncVid = (c) => {
         const v = window.__vidEl; if (!v || !window.__videoPrimary) return;
+        // NEVER STRETCH.  The box below is the CANVAS's rect, not the video's shape -- it is
+        // chosen so touches land where they look, and it follows noVNC's idea of the desktop,
+        // which lags the video's real resolution across a resize.  The published shell sets
+        // object-fit:fill on this element, so during that lag the picture is squeezed into a box
+        // of the wrong aspect: text becomes vertical lines.  Asserted here rather than only in
+        // the shell because the shell is published separately and this file is not -- a box that
+        // disagrees with the picture should cost a black bar, never a wrong shape.
+        if (v.style.objectFit !== 'contain') v.style.objectFit = 'contain';
         if (zoom <= 1.001) {
           const r = c.getBoundingClientRect();
           if (!r.width) return;
@@ -2532,23 +2916,8 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       copyBtn.textContent = ok ? '✓ copied' : '✗ failed';
       setTimeout(() => { copyBtn.textContent = '⧉ copy'; }, 1600);
     });
-    // debug toggle: bottom-left button to show/hide the whole diagnostics overlay (hud + log + copy)
-    const dbgBtn = document.createElement('button');
-    dbgBtn.appendChild(gGlyph('≡'));
-    dbgBtn.className = 'gbtn';                      // same three states as the rest of the row
-    dbgBtn.dataset.state = 'off';
-    dbgBtn.setAttribute('aria-label', 'diagnostics');
-    dbgBtn.style.cssText += 'bottom:14px;left:14px;z-index:31;font-size:26px';
-    // HIDDEN, NOT REMOVED.  The diagnostics overlay is the thing you want when the session is
-    // misbehaving, so deleting the way in would be trading a rare need for a permanent one; but it
-    // sat over the chat's input on a phone, and a control you hit by accident while typing is
-    // worse than one you have to ask for.  `localStorage.glassDiag = '1'` brings it back, and the
-    // overlay itself is untouched — this is about the button, not the capability.
-    let dbgWanted = false;
-    try { dbgWanted = localStorage.getItem('glassDiag') === '1'; } catch (_) {}
-    if (!dbgWanted) dbgBtn.style.display = 'none';
-    document.body.appendChild(dbgBtn);
-    let dbgOn = false;                              // debug overlay hidden by default; ≡ toggles it
+    // The diagnostics overlay (hud + log + copy) is toggled from the ⊞ list: TOOLS → debug log.
+    let dbgOn = false;                              // hidden by default
     const applyDbg = () => {
       // 'block', NOT '': the shell hides #hud/#diag in ITS stylesheet so they cannot flash before
       // this file arrives, and clearing the inline style hands the decision straight back to that
@@ -2559,13 +2928,11 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       hud.style.display = d; api.ui.diagEl.style.display = d;
       copyBtn.style.display = dbgOn ? '' : 'none';
       document.body.classList.toggle('dbg', dbgOn);   // moves the link pill clear of the hud
-      setBtn(dbgBtn, dbgOn ? 'on' : 'off');
       // debug view and the clean connecting overlay are mutually exclusive: showing debug hides the
       // overlay; hiding debug brings the overlay back if we're still connecting (before first frame).
       if (dbgOn) connEl.style.display = 'none';
       else if (!api.ui.isConnHidden()) { connEl.style.display = ''; connEl.style.opacity = ''; }
     };
-    dbgBtn.addEventListener('click', () => { dbgOn = !dbgOn; applyDbg(); });
     applyDbg();
 
     onOpen(ch, () => { diag('datachannel OPEN'); setStep(3);
@@ -2573,7 +2940,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     // The session is gone, so none of these can do anything — and "cannot" has to look different
     // from "off", or the row goes on inviting taps that will not land.
     ch.addEventListener('close', () => { diag('datachannel CLOSE');
-      for (const b of [pasteBtn, micBtn, spkBtn, qBtn]) setBtn(b, 'disabled'); });
+      for (const b of [pasteBtn, micBtn, spkBtn]) setBtn(b, 'disabled'); });
     ch.addEventListener('error', e => diag('datachannel ERROR ' + ((e.error && e.error.message) || '')));
     // The handshake is the only place the box says what it is called, so it is the only place
     // that can teach the progress screen for next time.  See LEARNT-NAME.
@@ -2670,6 +3037,41 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
             const want = fw / fh, got = vw / vh;
             return Math.abs(got - want) > 0.08 * want;
           };
+          // SHAPE IS NOT A STREAM PROBLEM, so it must not sit behind MOVING.  Every other
+          // watchdog below asks "is the picture arriving", and gates on bytes for good reason.
+          // This one asks "is the picture the right shape", and the answer does not depend on
+          // whether anything is arriving -- a resize on a SETTLED desktop produces no damage,
+          // so no frames, so vidKbs is 0 and the whole block was skipped exactly when the
+          // canvas was most likely to be stale.  Measured: rotating once healed (the resize
+          // itself made frames), rotating back did not, and the canvas kept the old aspect for
+          // good.  Same throttle, its own gate.
+          if (videoPrimary && shapeWrong() && now - lastHeal > 3000) {
+              lastHeal = now;
+              const c = document.querySelector('#screen canvas');
+              diag(`SHAPE: video ${vidEl.videoWidth}x${vidEl.videoHeight} does not match the ` +
+                   `desktop ${fbW()}x${fbH()}` +
+                   (c ? ` (canvas ${c.width}x${c.height})` : '') +
+                   ` — adopting, keyframe + resync`);
+              if (ctrl && ctrl.readyState === 'open')
+                ctrl.send(JSON.stringify({ request: 'keyframe' }));
+              // TELL NOVNC THE NEW SHAPE.  This branch has always known the desktop had changed
+              // size -- it is the test that fires -- and then asked only for pixels.  But the thing
+              // that SIZES THE CANVAS is noVNC, from _fbWidth/_fbHeight, and those only move when a
+              // DesktopSize rect reaches it.  While they are stale the canvas keeps the OLD aspect:
+              // measured, a 786x1390 portrait desktop laid out as 393x152 because noVNC still had
+              // 1468x566, and the picture fitted into that strip at 86x152.  Right aspect, right
+              // stream, absurd box.
+              //
+              // The video's intrinsic size is the authority here: it IS the desktop's pixels, which
+              // is more than noVNC can say while its own notion is stale.  _RESIZE sets both
+              // dimensions and refits the display, so the canvas takes the new aspect immediately
+              // rather than waiting for a rect that may not come.
+              if (typeof rfb !== 'undefined' && rfb && typeof rfb._resize === 'function'
+                  && vidEl.videoWidth > 0 && vidEl.videoHeight > 0) {
+                try { rfb._resize(vidEl.videoWidth, vidEl.videoHeight); } catch (_) {}
+              }
+              syncVideo(); api.video.nudge();
+          }
           if (videoPrimary && moving && now - lastHeal > 3000) {
             if (vidEl.paused) {
               lastHeal = now;
@@ -2680,16 +3082,6 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
               diag(`no frame presented for ${((now - api.video.presentedAt()) / 1000).toFixed(1)}s ` +
                    `(rs${vidEl.readyState} ${vidEl.videoWidth}x${vidEl.videoHeight}) — play() + resync`);
               api.video.play('stalled', true); syncVideo(); api.video.nudge();
-            } else if (shapeWrong()) {
-              lastHeal = now;
-              const c = document.querySelector('#screen canvas');
-              diag(`SHAPE: video ${vidEl.videoWidth}x${vidEl.videoHeight} does not match the ` +
-                   `desktop ${fbW()}x${fbH()}` +
-                   (c ? ` (canvas ${c.width}x${c.height})` : '') +
-                   ` — keyframe + resync`);
-              if (ctrl && ctrl.readyState === 'open')
-                ctrl.send(JSON.stringify({ request: 'keyframe' }));
-              syncVideo(); api.video.nudge();
             } else if (offscreen && api.video.presented() > 0) {
               lastHeal = now;
               diag(`presenting into an unseeable box ${Math.round(vr.width)}x${Math.round(vr.height)}` +
@@ -2772,8 +3164,35 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       vidEl.style.transform = `translate(${x.tx}px,${x.ty}px) scale(${x.zoom})`;
     } else {
       vidEl.style.transform = '';
-      vidEl.style.left = r.left + 'px'; vidEl.style.top = r.top + 'px';
-      vidEl.style.width = r.width + 'px'; vidEl.style.height = r.height + 'px';
+      // ONE FIT, NOT TWO.  The canvas rect says WHERE the desktop is -- it is the touch surface, so
+      // the picture has to sit on it -- but its SHAPE is noVNC's, derived from noVNC's idea of the
+      // desktop, and that lags the video's real resolution across a resize.  Setting the element to
+      // the rect and leaving object-fit to sort it out fits twice: the rect is letterboxed in the
+      // window, then the picture is letterboxed in the rect, and the result is a small picture
+      // inside two sets of bars.
+      //
+      // So fit ONCE, here, from the video's own intrinsic size -- the most fundamental frame
+      // available, because it is what the pixels actually are -- and place that inside the rect.
+      // The element's box then IS the picture: no inner letterbox, and object-fit has nothing left
+      // to do.  When the two shapes agree, which is the steady state, this is exactly the old
+      // behaviour; when they disagree it degrades to one centred picture instead of two nested fits.
+      const vw = vidEl.videoWidth, vh = vidEl.videoHeight;
+      if (vw && vh) {
+        const k = Math.min(r.width / vw, r.height / vh);
+        const w = vw * k, h = vh * k;
+        // the owner's own fit line, so the log shows what ACTUALLY placed the picture -- the
+        // shell's shellGeometry stops running the moment this owner is installed
+        const shp = `${vw}x${vh} in canvas ${Math.round(r.width)}x${Math.round(r.height)}` +
+                    ` @${Math.round(r.left)},${Math.round(r.top)} -> ${Math.round(w)}x${Math.round(h)}`;
+        if (shp !== window.__lastOwnerFit) { window.__lastOwnerFit = shp; diag('ownerfit ' + shp); }
+        vidEl.style.left = (r.left + (r.width - w) / 2) + 'px';
+        vidEl.style.top = (r.top + (r.height - h) / 2) + 'px';
+        vidEl.style.width = w + 'px'; vidEl.style.height = h + 'px';
+      } else {
+        // no frame decoded yet: nothing to take an aspect from, so sit on the rect as before
+        vidEl.style.left = r.left + 'px'; vidEl.style.top = r.top + 'px';
+        vidEl.style.width = r.width + 'px'; vidEl.style.height = r.height + 'px';
+      }
     }
   });
 
