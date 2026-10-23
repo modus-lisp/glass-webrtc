@@ -10,9 +10,12 @@
 ;;;;   GLASS_PORT=5902 NOSTR_SEC=<64hex> sbcl --load gateway-nostr.lisp
 ;;;;   (NOSTR_SEC fixes the box's identity so its npub is stable; omit for a dev key.)
 
-(require :asdf)
+#-modus (require :asdf)
 #+sbcl (setf (sb-ext:bytes-consed-between-gcs) (* 256 1024 1024))   ; fewer GCs on the send path
-(handler-bind ((warning #'muffle-warning))
+;; The lean gateway's dependencies are its system's :depends-on, installed by whatever built the
+;; image (a board's core installs them from tarballs, with no ASDF to call): load nothing here.
+(unless (member :glass-webrtc-lean *features*)
+ (handler-bind ((warning #'muffle-warning))
   (asdf:load-system "webrtc-data")
   ;; the media half -- not in GLASS-WEBRTC/NOSTR-LEAN (lean-feature.lisp, media-hooks.lisp; a
   ;; run-time test, since both systems share this file's fasl)
@@ -25,7 +28,7 @@
   ;; process ASKS.  Loading the system gets the client half (ADMISSION-ADMIT and friends) —
   ;; it starts nothing, subscribes to nothing, and listens on nothing.
   (asdf:load-system "glass/nostr")
-  (asdf:load-system "cl-nostr"))
+  (asdf:load-system "cl-nostr")))
 ;; glass-capture (the VP8 video path) and video-profiles are ASDF COMPONENTS, not
 ;; hand-loaded siblings.  They used to be (load (merge-pathnames ... *load-pathname*)),
 ;; which works when this file is LOADed as source and breaks the moment it is
@@ -300,7 +303,7 @@ port, because a silent refusal here would be diagnosed for an hour in the wrong 
   "An offer PAYLOAD is either a {\"sdp\",\"code\"} JSON envelope or a bare SDP string.
 Return (values SDP CODE).  (Uses IF, not OR: OR would keep only the primary value and
 silently drop CODE.)"
-  (let ((j (ignore-errors (com.inuoe.jzon:parse payload))))
+  (let ((j (ignore-errors (json-simple:parse payload))))
     (if (and (hash-table-p j) (gethash "sdp" j))
         (values (gethash "sdp" j) (gethash "code" j))
         (values payload nil))))
@@ -1255,7 +1258,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                                        ;; envelope when the desktop did not say, and the client
                                        ;; treats absence as "no better than the guess I had".
                                        (when expires (setf (gethash "expires" ht) expires))
-                                       (com.inuoe.jzon:stringify ht)))
+                                       (json-simple:stringify ht)))
                             (reply  (and (not skip)
                                          (cl-nostr.nip59:build-giftwrap kp phone-pub payload
                                                                         :after rumor-at))))

@@ -31,7 +31,7 @@ machine's home directory."
 (asdf:defsystem "glass-webrtc/nostr"
   :description "The gateway, signalled over nostr: gift-wrapped SDP over relays instead
 of a POST, so a browser reaches the desktop without a reachable address."
-  :depends-on ("glass-webrtc" "glass/nostr" "cl-nostr" "com.inuoe.jzon")
+  :depends-on ("glass-webrtc" "glass/nostr" "cl-nostr" "json-simple")
   :serial t
   :components ((:file "glass-capture")
                (:file "gateway-nostr")))
@@ -42,7 +42,7 @@ of a POST, so a browser reaches the desktop without a reachable address."
 ;;; admission, signalling and channels; see media-hooks.lisp for how the media calls go away.
 (asdf:defsystem "glass-webrtc/nostr-lean"
   :description "The nostr gateway, RFB over the data channel only (no audio/video/HTTP)."
-  :depends-on ("webrtc-data" "glass/nostr" "cl-nostr" "com.inuoe.jzon")
+  :depends-on ("webrtc-data" "glass/nostr" "cl-nostr" "json-simple")
   :serial t
   :components ((:file "lean-feature")
                (:file "media-hooks")
