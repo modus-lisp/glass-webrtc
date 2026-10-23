@@ -254,9 +254,10 @@ not on the ladder.  Setting webrtc-media:*VIDEO-PROFILE* is most of the mechanis
 re-reads it at the top of every pass — plus the backlog quantizer, which lives in the encoder."
   (when (member kbps *video-rungs*)
     (let ((p (rung-settings kbps)))
-      (setf vp8::*backlog-qi* (getf p :backlog-qi)
-            webrtc-media:*video-profile* (list* :name (format nil "~a kbps" kbps) p)
-            *video-kbps* kbps)
+      ;; by name: a lean gateway has no encoder (media-hooks.lisp)
+      (%set-opt-val "VP8" "*BACKLOG-QI*" (getf p :backlog-qi))
+      (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-PROFILE*" (list* :name (format nil "~a kbps" kbps) p))
+      (setf *video-kbps* kbps)
       ;; The rung's OWN unit first — kbps/8 kilobytes per second, which is what the ladder is named
       ;; in and what a person asked for — then the kibibyte figure the encoder is actually handed.
       ;; Printing only the second made a rung called 600 KB/s log itself as 585.94 and read as a bug.
@@ -434,12 +435,12 @@ so the phone's stepper shows what the box actually did rather than what was aske
         (let ((pause (zerop want)))
           (unless (eq pause *video-paused*)
             (setf *video-paused* pause)
-            (unless pause (setf webrtc-media:*force-keyframe* t))
+            (unless pause (%set-opt-val "WEBRTC-MEDIA" "*FORCE-KEYFRAME*" t))
             (format *error-output* "~&[video] ~:[RESUMED by the viewer (keyframe forced)~;PAUSED by the viewer — nothing is being captured or sent~]~%" pause)
             (finish-output *error-output*)))))
     (let ((req (%json-string-value json "request")))
       (when (equal req "keyframe")
-        (setf webrtc-media:*force-keyframe* t)
+        (%set-opt-val "WEBRTC-MEDIA" "*FORCE-KEYFRAME*" t)
         (format *error-output* "~&[video] keyframe requested by the viewer~%")
         (finish-output *error-output*)))
     (let ((tts (handle-tts-message json)))

@@ -14,9 +14,12 @@
 #+sbcl (setf (sb-ext:bytes-consed-between-gcs) (* 256 1024 1024))   ; fewer GCs on the send path
 (handler-bind ((warning #'muffle-warning))
   (asdf:load-system "webrtc-data")
-  (asdf:load-system "webrtc-media/rtc")     ; SRTP audio (G.711 both ways) over the same transport
-  (asdf:load-system "glass/audio-stream")   ; the DESKTOP's mix, over a socket — we listen on it
-  (asdf:load-system "glass/mic-stream")     ; ...and the phone's microphone, back the other way
+  ;; the media half -- not in GLASS-WEBRTC/NOSTR-LEAN (lean-feature.lisp, media-hooks.lisp; a
+  ;; run-time test, since both systems share this file's fasl)
+  (unless (member :glass-webrtc-lean *features*)
+    (asdf:load-system "webrtc-media/rtc")     ; SRTP audio (G.711 both ways) over the same transport
+    (asdf:load-system "glass/audio-stream")   ; the DESKTOP's mix, over a socket — we listen on it
+    (asdf:load-system "glass/mic-stream"))    ; ...and the phone's microphone, back the other way
   ;; ...and WHO MAY OPEN IT AT ALL.  Same relationship as the two above and the same argument:
   ;; the desktop owns its identity, its enrolled terminals and its login tokens, and this
   ;; process ASKS.  Loading the system gets the client half (ADMISSION-ADMIT and friends) —
@@ -88,7 +91,8 @@ is a convention that drifts."
 ;; prints this message every three seconds.  That is the correct failure — a box with no identity
 ;; of its own must not serve, and a loud loop is easier to diagnose than a gateway quietly running
 ;; as somebody else.
-(defparameter *box-secret*
+(defun %read-box-secret ()
+  "NOSTR_SEC, checked: 64 hex chars, or the gateway refuses (see above)."
   (let ((s (uiop:getenv "NOSTR_SEC")))
     (unless (and s (= (length s) 64) (every (lambda (c) (digit-char-p c 16)) s))
       (format *error-output*
@@ -98,8 +102,17 @@ is a convention that drifts."
                  @@ Rotating it changes the box npub: every issued login link and every enrolled~@
                  @@ device is invalidated, and the client's baked fallback pubkey needs updating.~%")
       (finish-output *error-output*)
-      (sb-ext:exit :code 2))
+      ;; the lean gateway runs inside a board's image: refuse, do not end the image
+      (if (%lean-p)
+          (error "NOSTR_SEC unset or not 64 hex chars: no box identity")
+          (sb-ext:exit :code 2)))
     s))
+
+;; Read when the file LOADS for the desktop gateway (loading it is starting it, below).  The lean
+;; gateway is built into a board's core ahead of time, so its identity is read when it STARTS --
+;; set *BOX-SECRET* (or NOSTR_SEC) before START-NOSTR-GATEWAY; a key baked into a core would be
+;; every board's key.
+(defparameter *box-secret* (if (%lean-p) nil (%read-box-secret)))
 
 ;; ---- pubkey auth: NOSTR_ALLOW is the DESKTOP's list now ----------------------
 ;; The allowlist, the enrolment store and the login-token key all moved to glass with the command
@@ -529,8 +542,9 @@ audio at all', and those want very different debugging.  One beep at the start a
 LOCAL to this peer deliberately: playing it into the session mix would beep at every listener for
 a connection that is not theirs, and would put a sound on the desktop that the desktop did not
 make."
-  (let ((intro (reed:make-buffer-source (glass:audio-tone 880 0.12 :rate 8000) :frame-samples 160)))
-    (lambda () (or (funcall intro) (glass:tap-next-frame tap)))))
+  (let ((intro (%opt-call "REED" "MAKE-BUFFER-SOURCE"
+                          (%opt-call "GLASS" "AUDIO-TONE" 880 0.12 :rate 8000) :frame-samples 160)))
+    (lambda () (or (funcall intro) (%opt-call "GLASS" "TAP-NEXT-FRAME" tap)))))
 
 ;; ---- route attribution: which route a session used, and how it ended -------------------------
 ;;
@@ -685,7 +699,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                ;; PRIME 2 frames of queue: this process also encodes video, so its sender thread
                ;; gets preempted, and 40 ms of cushion is cheaper than a gap every time it does.
                (setf tap (ignore-errors
-                          (glass:make-audio-tap
+                          (%opt-call "GLASS" "MAKE-AUDIO-TAP"
                            :host *audio-host* :port *audio-port*
                            :name (if pub (subseq pub 0 8) "peer")
                            :rate 8000 :frame-samples 160 :prime 2 :gain *audio-gain*
@@ -698,18 +712,21 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                ;; no ear: the microphone arriving is not this file's business to have an opinion
                ;; about, and a port with nobody behind it is exactly the silence case above.
                (setf mic (ignore-errors
-                          (glass:make-mic-sender
+                          (%opt-call "GLASS" "MAKE-MIC-SENDER"
                            :host *mic-host* :port *mic-port*
                            :name (if pub (subseq pub 0 8) "peer")
                            :rate 8000 :frame-samples 160
                            :log (lambda (m) (format *error-output* "~&[mic] ~a~%" m)))))
+               ;; audio + video: only when the media half is loaded (media-hooks.lisp) -- a
+               ;; lean gateway carries the RFB data channel alone
+               (when (%media-p)
                (multiple-value-bind (astop ctx)
                    (ignore-errors
-                     (webrtc-media:start-audio
+                     (%opt-call "WEBRTC-MEDIA" "START-AUDIO"
                       agent (dtls-conn-session conn)
                       :source (and tap (%connect-tone-then tap))
                       ;; the samples first — the meter is derived from the same frame anyway
-                      :on-rx-pcm (and mic (glass:mic-feed mic))
+                      :on-rx-pcm (and mic (%opt-call "GLASS" "MIC-FEED" mic))
                       :on-rx-level (let ((n 0))
                                      (lambda (lvl)
                                        (when (zerop (mod (incf n) 50))   ; ~1x/s
@@ -731,7 +748,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                      (format *error-output* "~&[gw-nostr] desktop capture ~:[FAILED~;up~] (video-primary)~%" cap))
                    (setf video-stop
                          (ignore-errors
-                           (webrtc-media:start-video
+                           (%opt-call "WEBRTC-MEDIA" "START-VIDEO"
                             agent (dtls-conn-session conn) ctx :pt *video-pt*
                             :qi *video-qi* :fps *video-fps*
                             :max-qi *video-max-qi* :target-kbs *video-target-kbs*
@@ -749,7 +766,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                             :source (when cap
                                       (lambda ()
                                         (unless *video-paused*
-                                          (capture-take cap :scale (webrtc-media:video-scale)))))
+                                          (capture-take cap :scale (%opt-call "WEBRTC-MEDIA" "VIDEO-SCALE")))))
                             :on-stats (lambda (v)
                                         (setf *last-video-stats* v)
                                         (write-stats (stats-plist)))
@@ -762,7 +779,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                    (format *error-output* "~&[gw-nostr] video started — VP8 pt=~a qi=~a fps=~a maxqi=~a target=~aKB/s frame<=~aKB cleanup=~ams backlog-qi=~a/~ax~%"
                            *video-pt* *video-qi* *video-fps* *video-max-qi* *video-target-kbs*
                            *video-max-frame-kb* *video-cleanup-ms*
-                           vp8::*backlog-qi* vp8::*backlog-x*)))
+                           (%opt-val "VP8" "*BACKLOG-QI*") (%opt-val "VP8" "*BACKLOG-X*")))))
                (webrtc-serve-datachannel
                 conn :duration 3600.0
                 :alive-p (lambda () (peer-alive-p agent :away (and away (not away-final))))
@@ -875,14 +892,14 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                              ;; front of the answer.  A keystroke is the earliest warning the box
                              ;; can have that the picture is about to change, and it is already in
                              ;; our hands.
-                             (setf webrtc-media:*video-input-at* (get-internal-real-time))
+                             (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-INPUT-AT*" (get-internal-real-time))
                              ;; ... and WHERE, when the event says so.  These bytes are on their
                              ;; way to the desktop either way; this only reads them, and only for
                              ;; the last PointerEvent in the buffer, so the sender can know where
                              ;; the user's attention is without anything extra crossing the link.
                              ;; What reads it is WEBRTC-MEDIA:*CURSOR-PRIORITY*, which is off by
                              ;; default — see its docstring for what happened when it was on.
-                             (webrtc-media:note-rfb-input bytes)
+                             (when (%media-p) (%opt-call "WEBRTC-MEDIA" "NOTE-RFB-INPUT" bytes))
                              (sb-bsd-sockets:socket-send glass bytes (length bytes))))))))))
            (error (e)
              (incf *sessions-failed*)
@@ -933,13 +950,13 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
       ;; desktop).  The mix itself keeps running — it is the desktop's, not this session's, and
       ;; the next dial-in joins it where it is.
       (when tap
-        (format *error-output* "~&[audio] ~a~%" (glass:tap-report tap))
-        (ignore-errors (glass:tap-stop tap)))
+        (format *error-output* "~&[audio] ~a~%" (%opt-call "GLASS" "TAP-REPORT" tap))
+        (ignore-errors (%opt-call "GLASS" "TAP-STOP" tap)))
       ;; and this peer's microphone: closing the connection is what tells the desktop the
       ;; microphone is gone, which is what sends its ear back to whatever it was listening to
       (when mic
-        (format *error-output* "~&[mic] ~a~%" (glass:mic-sender-report mic))
-        (ignore-errors (glass:mic-sender-stop mic)))
+        (format *error-output* "~&[mic] ~a~%" (%opt-call "GLASS" "MIC-SENDER-REPORT" mic))
+        (ignore-errors (%opt-call "GLASS" "MIC-SENDER-STOP" mic)))
       (when glass (ignore-errors (sb-bsd-sockets:socket-close glass)))
       (ignore-errors (ice-close agent)))))   ; release the TURN allocation + ICE socket
 
@@ -1095,7 +1112,11 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
     answer))
 
 ;;; ---- Nostr signaling loop --------------------------------------------------
-(let* ((kp      (cl-nostr.keys:keypair-from-secret *box-secret*))
+;;; A FUNCTION, so a board can start it when its network and identity are up.  The desktop
+;;; gateway still starts it as this file loads (the end of the file), which is how kiln runs it.
+(defun start-nostr-gateway ()
+ (unless *box-secret* (setf *box-secret* (%read-box-secret)))
+ (let* ((kp      (cl-nostr.keys:keypair-from-secret *box-secret*))
        (box-pub (cl-nostr.keys:public-hex kp))
        (box-npub (ignore-errors (cl-nostr.bech32:npub-encode (cl-nostr.keys:public-key-of-secret *box-secret*))))
        (pool    (cl-nostr.pool:make-pool *relays*)))
@@ -1255,4 +1276,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
        (error (e) (format t "~&@@ signal error: ~a~%" e) (finish-output)))))
   (format t "@@ subscribed; waiting for gift-wrapped offers~%")
   (finish-output)
-  (loop (sleep 5)))
+  (loop (sleep 5))))
+
+;; The desktop gateway: loading this file is starting it (kiln, gw-keepalive.sh).
+(unless (%lean-p) (start-nostr-gateway))

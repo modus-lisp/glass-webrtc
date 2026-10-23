@@ -21,7 +21,8 @@ machine's home directory."
   ;; dependency until now, because a subdirectory loaded by path declares nothing.
   :depends-on ("webrtc-data" "webrtc-media" "glass" "hunchentoot")
   :serial t
-  :components ((:file "video-profiles")
+  :components ((:file "media-hooks")
+               (:file "video-profiles")
                (:file "gateway")))
 
 ;;; The nostr-signalled half: the same gateway reached over relays instead of a local
@@ -30,7 +31,20 @@ machine's home directory."
 (asdf:defsystem "glass-webrtc/nostr"
   :description "The gateway, signalled over nostr: gift-wrapped SDP over relays instead
 of a POST, so a browser reaches the desktop without a reachable address."
-  :depends-on ("glass-webrtc" "glass/nostr" "cl-nostr")
+  :depends-on ("glass-webrtc" "glass/nostr" "cl-nostr" "com.inuoe.jzon")
   :serial t
   :components ((:file "glass-capture")
+               (:file "gateway-nostr")))
+
+;;; The same nostr gateway with ONLY the RFB data channel: no audio, no VP8 video, no HTTP/noVNC
+;;; (hunchentoot), none of webrtc-media.  For a board that serves its own desktop -- a Pi Zero --
+;;; where the media stack is most of the code and its encoder far too heavy.  Same session,
+;;; admission, signalling and channels; see media-hooks.lisp for how the media calls go away.
+(asdf:defsystem "glass-webrtc/nostr-lean"
+  :description "The nostr gateway, RFB over the data channel only (no audio/video/HTTP)."
+  :depends-on ("webrtc-data" "glass/nostr" "cl-nostr" "com.inuoe.jzon")
+  :serial t
+  :components ((:file "lean-feature")
+               (:file "media-hooks")
+               (:file "video-profiles")
                (:file "gateway-nostr")))
