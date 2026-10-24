@@ -122,7 +122,7 @@
 ;; other half of "a swap": the gateway that stopped answering commands must still answer offers.
 (dolist (kept '("(defun parse-offer" "(defun process-offer" "(defun run-session"
                 "(defun wrap-seen-p" "m=application" "(defun glass-connect"
-                "webrtc-serve-datachannel" "glass:make-audio-tap" "glass:make-mic-sender"
+                "webrtc-serve-datachannel" "\"MAKE-AUDIO-TAP\"" "\"MAKE-MIC-SENDER\""
                 "(warp-sid-p sid)" "(payload-sid-p sid)" "(control-sid-p sid)"))
   (ok (format nil "still in gateway-nostr.lisp: ~a" kept) (search kept *gateway*)))
 

@@ -314,6 +314,10 @@ silently drop CODE.)"
   ;; Nagle on the tiny FBUR/input path is the same reason it always was.
   (values (glass:open-connection :host *glass-host* :port *glass-port*)))
 
+;; video-profiles.lisp's (the media half) owns *VIDEO-PAUSED*; the video source below reads it.
+;; Proclaimed special here, unbound, so this file compiles on its own (unix-socket-test.lisp
+;; compiles it without the media half) and a lean build that never makes a video source is fine.
+(defvar *video-paused*)
 (defvar *last-assoc* nil)
 
 ;; Connection health, counted rather than only logged.  These ride the stats file, so the pipeline
