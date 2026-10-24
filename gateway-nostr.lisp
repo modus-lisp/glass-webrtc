@@ -392,6 +392,9 @@ silently drop CODE.)"
 ;;
 ;; INERT unless PAYLOAD_CHANNEL is set: no file is read, no thread is started, and a phone that asks
 ;; is answered `none` so it can say so and offer Retry.  See payload-channel.lisp.
+;; ALREADY LOADED is the lean system's case (payload-channel is its component): loading it
+;; again by path fails on a board, and the stubs below would then replace the real thing.
+(unless (fboundp 'payload-on-message)
 (handler-case
     (load (asdf:system-relative-pathname "glass-webrtc" "payload-channel.lisp"))
   (error (e)
@@ -402,7 +405,7 @@ silently drop CODE.)"
     (defun payload-on-message (state assoc sid payload pub)
       (declare (ignore assoc sid payload pub))
       state)
-    (defun payload-close (state) (declare (ignore state)) nil)))
+    (defun payload-close (state) (declare (ignore state)) nil))))
 
 ;;; ---- one live session per terminal ------------------------------------------
 ;; A phone never says goodbye.  It locks its screen, changes network, or just reloads the page and

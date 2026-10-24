@@ -47,4 +47,8 @@ of a POST, so a browser reaches the desktop without a reachable address."
   :components ((:file "lean-feature")
                (:file "media-hooks")
                (:file "video-profiles")
+               ;; a component here, not gateway-nostr's run-time LOAD by system-relative path:
+               ;; a board cannot find the file that way, and the stubs it fell back to answered
+               ;; a published shell's payload request with nothing
+               (:file "payload-channel")
                (:file "gateway-nostr")))
