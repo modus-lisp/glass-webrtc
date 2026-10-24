@@ -1283,7 +1283,10 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
        (error (e) (format t "~&@@ signal error: ~a~%" e) (finish-output)))))
   (format t "@@ subscribed; waiting for gift-wrapped offers~%")
   (finish-output)
-  (loop (sleep 5))))
+  ;; PUMP, not SLEEP: on modus cl-nostr has no reader threads -- every open relay (this pool's
+  ;; and the desktop's DM bot's) is serviced by whoever calls PUMP, and nobody else did, so no
+  ;; offer ever reached the handler above.  On SBCL it sleeps, which is what this did.
+  (loop (cl-nostr.relay:pump 5))))
 
 ;; The desktop gateway: loading this file is starting it (kiln, gw-keepalive.sh).
 (unless (%lean-p) (start-nostr-gateway))
