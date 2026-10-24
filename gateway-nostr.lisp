@@ -1119,6 +1119,10 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
 ;;; gateway still starts it as this file loads (the end of the file), which is how kiln runs it.
 (defun start-nostr-gateway ()
  (unless *box-secret* (setf *box-secret* (%read-box-secret)))
+ ;; NO VIDEO PROMISED WITHOUT A VIDEO SENDER: without the media stack the answer's video m-line
+ ;; is inactive, so the browser shows the RFB view instead of waiting on a track (webrtc-data
+ ;; *ANSWER-VIDEO*).  This was the RFB-mode `stall': the desktop was arriving all along.
+ (setf webrtc-data::*answer-video* (%media-p))
  (let* ((kp      (cl-nostr.keys:keypair-from-secret *box-secret*))
        (box-pub (cl-nostr.keys:public-hex kp))
        (box-npub (ignore-errors (cl-nostr.bech32:npub-encode (cl-nostr.keys:public-key-of-secret *box-secret*))))
