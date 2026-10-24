@@ -1120,6 +1120,13 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
 ;;; ---- Nostr signaling loop --------------------------------------------------
 ;;; A FUNCTION, so a board can start it when its network and identity are up.  The desktop
 ;;; gateway still starts it as this file loads (the end of the file), which is how kiln runs it.
+(defparameter *offer-backlog* 20
+  "How many stored gift wraps to ask the relays for at subscription.  Every one is unwrapped (two
+NIP-44 decryptions and a signature check) before a fresh offer behind it is seen: nothing on a
+desktop, seconds EACH on a Pi Zero, so a box with a history answered its next phone minutes
+late.  A gift wrap's created_at is randomised, so the backlog cannot be cut by time; the board
+asks for fewer (kiln boot/zero-gateway.lisp).")
+
 (defun start-nostr-gateway ()
  (unless *box-secret* (setf *box-secret* (%read-box-secret)))
  ;; NO VIDEO PROMISED WITHOUT A VIDEO SENDER: without the media stack the answer's video m-line
@@ -1187,7 +1194,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
    ;; relays; live offers still stream after EOSE.  The pool now keepalives + reconnects, so
    ;; the subscription no longer dies on an idle relay drop.
    (list (cl-nostr.filter:make-filter :kinds '(1059) :tags (list (cons "p" (list box-pub)))
-                                      :limit 20))
+                                      :limit *offer-backlog*))
    :on-event
    (lambda (wrap relay)
      (declare (ignore relay))
