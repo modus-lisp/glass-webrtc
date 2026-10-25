@@ -193,6 +193,13 @@ const failConn = () => {
   stepEls.forEach(e => e.classList.remove('now'));
   if (el) el.classList.add('fail');
 };
+// …and undo that, when the attempt turns out not to have been over: a slow box's answer arriving
+// after the page had stopped waiting.  Without it the list read "answered in 62.5s" in red, under
+// "The desktop did not answer" -- two claims, one of them false.
+const unfailConn = () => {
+  stepEls.forEach(e => e.classList.remove('fail'));
+  if (stepEls[curStep]) stepEls[curStep].classList.add('now');
+};
 let connHidden = false;
 const hideConn = () => { if (connHidden) return; connHidden = true; connEl.style.opacity = '0';
   setTimeout(() => { connEl.style.display = 'none'; setLink(linkState); }, 440); };
@@ -771,7 +778,8 @@ function scheduleReconnect(why) {
   if (reconnecting) return;
   if (!(codeAlive(loadCode()) || hasDevice())) {
     diag('not reconnecting: no usable credential (' + why + ')');
-    if (window.__showNoCredential) window.__showNoCredential();
+    if (window.__showNoCredential)
+      window.__showNoCredential(null, window.__answered ? { route: true } : undefined);
     return;
   }
   const n = reconnAttempts();
@@ -1190,8 +1198,13 @@ async function makeIdentity() {
                  : (!code && enrolExpiry() ? new Date(enrolExpiry()) : null);
     const routes = window.__routes
       ? ' (' + window.__routes.n + ' routes, ' + window.__routes.relay + ' via relay)' : '';
+    // ROUTE: the box answered and the connection still did not come up.  The credential is not the
+    // story then -- it was accepted -- and saying "not enrolled" sent the reader after the wrong
+    // fault (a phone on cellular reaching a gateway behind NAT: answered, then no ICE peer).
+    const route = Boolean(opts && opts.route);
     if (!pending)
-      setConnRaw(why || (codeDead ? 'This link has expired'
+      setConnRaw(why || (route ? 'Reached your desktop, but no route worked'
+                         : codeDead ? 'This link has expired'
                          : code ? 'The desktop did not answer'
                          : 'This terminal is not enrolled'));
     // Rendered fresh each time rather than appended: the watchdog and SCHEDULERECONNECT can both
@@ -1201,18 +1214,24 @@ async function makeIdentity() {
     noCredEl.id = 'nocred';
     noCredEl.style.cssText = 'max-width:22em;font-size:13px;line-height:1.5;opacity:.75;margin-top:2px';
     const signer = haveSigner();
-    noCredEl.innerHTML =
-      (pending
-        ? (when ? 'This browser’s access ran out on ' + when.toLocaleString() + '. Trying it anyway.<br>'
-                : 'This browser’s access may have run out. Trying it anyway.<br>')
-        : (when ? 'It was valid until ' + when.toLocaleString() + '.<br>'
-           : (code && !codeDead
-              ? 'The link is still valid, but nothing answered the offer' + routes + '. The desktop may be offline, or this network may be blocking the route.<br>'
-              : ''))) +
-      (signer ? 'Sign in with your Nostr key to enrol this browser again, or DM <b>link</b> to the box for a new one.'
-              : 'DM <b>link</b> to the box for a new one.');
+    if (route)
+      noCredEl.innerHTML =
+        'The desktop answered, but none of the routes' + routes + ' carried the connection — a ' +
+        'network between here and there is blocking it, or the desktop gave up waiting.<br>' +
+        'DM <b>link</b> to the box for a new link and try again.';
+    else
+      noCredEl.innerHTML =
+        (pending
+          ? (when ? 'This browser’s access ran out on ' + when.toLocaleString() + '. Trying it anyway.<br>'
+                  : 'This browser’s access may have run out. Trying it anyway.<br>')
+          : (when ? 'It was valid until ' + when.toLocaleString() + '.<br>'
+             : (code && !codeDead
+                ? 'The link is still valid, but nothing answered the offer' + routes + '. The desktop may be offline, or this network may be blocking the route.<br>'
+                : ''))) +
+        (signer ? 'Sign in with your Nostr key to enrol this browser again, or DM <b>link</b> to the box for a new one.'
+                : 'DM <b>link</b> to the box for a new one.');
     connMsg.insertAdjacentElement('afterend', noCredEl);
-    if (signer) {
+    if (signer && !route) {
       const btn = noCredBtn = document.createElement('button');
       btn.type = 'button';
       btn.id = 'signin';
@@ -1235,7 +1254,7 @@ async function makeIdentity() {
         location.reload();
       });
       noCredEl.insertAdjacentElement('afterend', btn);
-    } else if (signerLooks++ < 6) {
+    } else if (!route && signerLooks++ < 6) {
       // An extension injects window.nostr on its own schedule, and this screen can be painted on
       // the first turn of the event loop (no code, no device).  Absent-at-render is therefore not
       // absent, and the difference is a button that never appears — so look again for three
@@ -1244,6 +1263,7 @@ async function makeIdentity() {
     }
     if (!pending) failConn();
     diag((pending ? 'enrolment expired — offering the ways back in while we try'
+                  : route ? 'answered, but no route came up'
                   : (code && !codeDead ? 'no answer from the box (code still valid)' : 'no usable credential')) +
          (when ? ' (expired ' + when.toISOString() + ')' : '') +
          (signer ? ' — offering the signer' : ' — no signer to offer'));
@@ -1366,6 +1386,13 @@ async function makeIdentity() {
           const ac = (answer.match(/a=candidate[^\r\n]*/g) || []);
           diag(`answer ${answer.length}B, ${ac.length} cand (${ac.filter(c=>c.includes('srflx')).length} srflx)`);
           clearTimeout(window.__answerWatchdog);
+          clearInterval(window.__answerTick);
+          if (window.__clearWaysBackIn) window.__clearWaysBackIn();
+          unfailConn();
+          setConnRaw('');
+          // THE BOX ANSWERED.  Whatever fails after this is the ROUTE, never the credential: a
+          // denied offer is answered with silence, so an answer is the box saying "you are in".
+          window.__answered = { cands: ac.length, srflx: ac.filter(c => c.includes('srflx')).length };
           await pc.setRemoteDescription({ type: 'answer', sdp: answer });
           const ms = window.__offerAt ? Math.round(performance.now() - window.__offerAt) : null;
           setDetail(1, ms != null ? `answered in ${(ms / 1000).toFixed(1)}s` : 'answered');
@@ -1416,8 +1443,21 @@ async function makeIdentity() {
   await Promise.any(pool.publish(relays, wrap));
   diag('offer published (' + id.mode + ')');
   setStatus('offer sent — waiting for the box');
+  // A SMALL BOARD IS SLOW TO ANSWER.  A Pi Zero gateway takes most of a minute to unwrap an offer,
+  // gather and wrap its answer, so renewing at 18 s reloaded this page out from under an answer that
+  // was on its way, and the box then waited for a peer that had gone (measured: QEMU at Zero speed,
+  // answers at 50-65 s).
+  // SAY HOW LONG, NOT JUST THAT.  Measured on a Pi Zero gateway (QEMU at Zero speed): answers in
+  // 50-65 s from a fresh box.  The page waits up to 120 s, counting, and concludes nothing before.
+  const waitedFrom = performance.now();
+  window.__answerTick = setInterval(() => {
+    if (pc.remoteDescription) return clearInterval(window.__answerTick);
+    const t = Math.round((performance.now() - waitedFrom) / 1000);
+    if (t >= 10) setConnRaw('Waiting for the desktop to answer — ' + t + ' s (a small board can take a minute)');
+  }, 5000);
   window.__answerWatchdog = setTimeout(async () => {
     if (pc.remoteDescription) return;
+    clearInterval(window.__answerTick);
     // A `link' DM is signed with the DEVICE key and is answered for an enrolled device or an
     // allowlisted owner — so after a signed-in offer went unanswered there is nothing left for it
     // to prove, and fifteen seconds spent finding that out is fifteen seconds the screen spends
@@ -1428,5 +1468,5 @@ async function makeIdentity() {
     const fresh = await requestFreshCode(pool, deviceSecret());
     if (fresh) { storeCode(fresh); diag('renewed — reloading'); location.reload(); }
     else window.__showNoCredential();
-  }, 18000);
+  }, 120000);
 })();
