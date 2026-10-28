@@ -1397,11 +1397,15 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
        (error (e) (format t "~&@@ signal error: ~a~%" e) (finish-output)))))
   (format t "@@ subscribed; waiting for gift-wrapped offers~%")
   (finish-output)
+  ;; the DTLS identity now, not between the first phone's offer and its answer (~4 s on a board)
+  (webrtc-identity)
   ;; PUMP, not SLEEP: on modus cl-nostr has no reader threads -- every open relay (this pool's
   ;; and the desktop's DM bot's) is serviced by whoever calls PUMP, and nobody else did, so no
   ;; offer ever reached the handler above.  On SBCL it sleeps, which is what this did.
   (let ((deadline (+ (get-universal-time) *ready-timeout*)))
-    (loop (cl-nostr.relay:pump 5)
+    ;; A SHORT pump: the answer waits in the outbox until this returns, and a 5 s pump held a
+    ;; ready answer for up to 5 s (13 s under load) on a board.
+    (loop (cl-nostr.relay:pump 0.25)
           (%outbox-drain)
           (when (> (get-universal-time) deadline) (%gateway-ready))))))
 
