@@ -1197,7 +1197,13 @@ asks for fewer (kiln boot/zero-gateway.lisp).")
    ;; :limit caps the initial backlog — this box pubkey has days of old gift-wraps on the
    ;; relays; live offers still stream after EOSE.  The pool now keepalives + reconnects, so
    ;; the subscription no longer dies on an idle relay drop.
+   ;; :SINCE drops the rest at the relay: only the last 48 hours, the customary NIP-59 window
+   ;; (a wrap is back-dated by up to two days, so a live one is always inside it).  Anything
+   ;; older holds an offer we would only decrypt to ignore — and on a Zero each decrypt is
+   ;; seconds: a box with history spent its first ten minutes unwrapping last week's offers
+   ;; while the phone's live one waited behind them.
    (list (cl-nostr.filter:make-filter :kinds '(1059) :tags (list (cons "p" (list box-pub)))
+                                      :since (- (%unix-now) 172800)
                                       :limit *offer-backlog*))
    :on-event
    (lambda (wrap relay)
