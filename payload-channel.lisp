@@ -222,6 +222,36 @@ is waiting for is just a thread holding a queue."
     (error (e)
       (format *error-output* "~&[payload] send failed: ~a~%" e)
       (finish-output *error-output*))))
+(defun %payload-send-on-loop (loop assoc sid bytes sha enc alive-p)
+  "%PAYLOAD-SEND-LOOP as timer steps on LOOP: one chunk per step while SCTP has room, the next
+step at once when it had room and in 20 ms when it did not -- the wait SCTP-SEND-DATA used to do
+on this transfer's own thread.  ALIVE-P false ends it at the next step."
+  (let ((n (length bytes)) (off 0))
+    (labels ((next-chunk ()
+               (handler-case
+                   (cond
+                     ((not (and (funcall alive-p)
+                                (not (eq (getf (sctp-stats assoc) :state) :aborted))))
+                      (format *error-output* "~&[payload] transfer abandoned at ~a/~a B~%" off n)
+                      (finish-output *error-output*))
+                     ((>= off n)
+                      (format *error-output* "~&[payload] sent ~a B (~a) to the phone~%" n enc)
+                      (finish-output *error-output*))
+                     ((sctp-backlogged-p assoc)
+                      (cl-transport.loop:after loop 0.02 #'next-chunk :what "payload send"))
+                     (t
+                      (sctp-send-binary assoc sid (subseq bytes off (min n (+ off *payload-chunk*))))
+                      (incf off *payload-chunk*)
+                      (cl-transport.loop:after loop 0 #'next-chunk :what "payload send")))
+                 (error (e)
+                   (format *error-output* "~&[payload] send failed: ~a~%" e)
+                   (finish-output *error-output*)))))
+      (sctp-send-string
+       assoc sid
+       (format nil "{\"t\":\"begin\",\"sha\":\"~a\",\"enc\":\"~a\",\"len\":~d,\"api\":1}"
+               sha enc n))
+      (next-chunk))))
+
 ;;; ---- the other direction: the phone puts a file on this box --------------------------------
 ;;;
 ;;; THE FILE BROWSER COULD LOOK AND NOT TOUCH.  warp-files has six commands and five of them read;
@@ -471,11 +501,16 @@ message."
                       (t
                        ;; The flag the sender reads, so PAYLOAD-CLOSE can stop a transfer that is
                        ;; still running when the session unwinds.
-                       (let ((closed nil))
-                         (bt:make-thread
-                          (lambda () (%payload-send-loop assoc sid bytes sha enc
-                                                         (lambda () (not closed))))
-                          :name "payload-send")
+                       (let ((closed nil)
+                             (loop (and (boundp '*net-loop*) (symbol-value '*net-loop*))))
+                         ;; on the network loop: timer steps, no thread (gateway-nostr.lisp)
+                         (if loop
+                             (%payload-send-on-loop loop assoc sid bytes sha enc
+                                                    (lambda () (not closed)))
+                             (bt:make-thread
+                              (lambda () (%payload-send-loop assoc sid bytes sha enc
+                                                             (lambda () (not closed))))
+                              :name "payload-send"))
                          (setf (peer-served peer) (lambda () (setf closed t)))))))
                   peer)))))))
     (error (e)

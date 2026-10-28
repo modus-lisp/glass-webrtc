@@ -682,6 +682,8 @@ cost one file check between them, each with its own stream, budget, scroll, menu
 (defclass warp-link ()
   ((mux :initform nil :accessor warp-link-mux
         :documentation "WARP-DOM's app id -> channel router, one per peer.")
+   (clocks :initform '() :accessor warp-link-clocks
+           :documentation "On the network loop, each app's tick timer -- cancelled by WARP-CLOSE.")
    (closed :initform nil :accessor warp-link-closed
            :documentation "Set by WARP-CLOSE before the clocks stop.  Every app's send lambda reads
 it, because they all share one association: when the session goes, all of them stop, and the flag is
@@ -699,6 +701,9 @@ the honest report of a box that does not have this."
                  (lambda (frame) (ignore-errors (sctp-send-string assoc sid frame)))))
       (handler-case
           (let* ((invoker (warp-invoker-for pub))
+                 ;; on the network loop the channel gets no thread (:HZ NIL) and is ticked by a
+                 ;; timer instead (below); elsewhere WARP-DOM runs its own clock
+                 (loop (and (boundp '*net-loop*) (symbol-value '*net-loop*)))
                  (ch (apply (find-symbol "OPEN-CHANNEL" "WARP-DOM")
                             (getf spec :projection)
                             :view (getf spec :view)
@@ -706,7 +711,7 @@ the honest report of a box that does not have this."
                             :rows *warp-rows*
                             :budget *warp-budget*
                             :invoker invoker
-                            :hz *warp-hz*
+                            :hz (if loop nil *warp-hz*)
                             :name (format nil "~a~@[/~a~]" (if pub (subseq pub 0 8) "peer") app)
                             :log (lambda (m)
                                    (format *error-output* "~&[warp] ~a~%" m)
@@ -723,6 +728,14 @@ the honest report of a box that does not have this."
                                     (sctp-send-string assoc sid frame))
                             (let ((attach (getf spec :attach)))
                               (when attach (list :attach attach))))))
+            (when loop
+              (push (cl-transport.loop:every-seconds
+                     loop (/ 1.0 (max 1 *warp-hz*))
+                     (lambda ()
+                       (unless (warp-link-closed link)
+                         (funcall (find-symbol "CHANNEL-TICK" "WARP-DOM") ch)))
+                     :what "warp tick")
+                    (warp-link-clocks link)))
             (format *error-output*
                     "~&[warp] channel open for ~a... app ~a as ~(~a~) (~a B/pass at ~a Hz)~%"
                     (if pub (subseq pub 0 8) "peer") (or app "devices") invoker
@@ -775,6 +788,10 @@ the difference between a panel that says nothing and a desktop connection that b
 signal and may be called with nothing to close."
   (when state
     (ignore-errors (setf (warp-link-closed state) t))   ; stop the senders before the clocks
+    (let ((loop (and (boundp '*net-loop*) (symbol-value '*net-loop*))))
+      (when loop
+        (dolist (tm (warp-link-clocks state)) (cl-transport.loop:cancel loop tm))
+        (setf (warp-link-clocks state) '())))
     (ignore-errors
      (dolist (cell (funcall (find-symbol "MUX-CHANNELS" "WARP-DOM") (warp-link-mux state)))
        (let ((stats (funcall (find-symbol "CHANNEL-STATS" "WARP-DOM") (cdr cell))))

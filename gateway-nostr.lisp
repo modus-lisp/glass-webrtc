@@ -478,6 +478,14 @@ expired would have been decoration; the stamp had to start meaning `the peer sen
 seconds.  Five minutes: long enough to answer a message and come back, short enough that a phone
 that walked out of range is not holding a relay allocation for the afternoon.")
 
+;;; Which link belongs to which agent -- so ON-READY's bridge can close the link it serves, and
+;;; RETIRE-SESSION (which knows only the agent) can end a session properly rather than only
+;;; pulling its socket out from under it.
+(defvar *links* (make-hash-table :test 'eq))
+(defun %current-link (agent) (gethash agent *links*))
+(defun %forget-link (agent link) (when (eq (gethash agent *links*) link) (remhash agent *links*)))
+
+
 (defun forget-session (pub agent)
   "Drop PUB's registry entry, but only if it is still AGENT — a reconnect may already have replaced it."
   (bt:with-lock-held (*live-lock*)
@@ -492,7 +500,11 @@ ALIVE-P sees the agent stopped and unwinds, which is what releases the TURN allo
     (when old
       (format t "~&@@ retiring previous session for ~a... (~a)~%" (subseq pub 0 8) why)
       (finish-output)
-      (ignore-errors (ice-close (sess-agent old))))))
+      ;; through the link when there is one, so its ON-CLOSE runs (record, glass, timers, agent)
+      (let ((link (%current-link (sess-agent old))))
+        (if link
+            (webrtc-close-on-loop link why)
+            (ignore-errors (ice-close (sess-agent old))))))))
 
 (defun peer-alive-p (agent &key away)
   "NIL once the agent is closed or the peer has been silent past the limit that applies to it.
@@ -684,30 +696,36 @@ CAUSE is the single most important field and it is ordered most-specific-first:
           :silent-s (when quiet (float quiet 1.0))
           :err err)))
 
-(defun run-session (conn agent &key pub)
-  "Drive DTLS, run the data channel, and bridge it to glass once the channel opens.
-Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
-  (let ((glass nil) (audio-stop nil) (video-stop nil) (cap nil) (tap nil) (mic nil)
-        ;; This peer's warp channel, or NIL — which is what it stays unless the phone sends on
-        ;; stream 102, which it only does if somebody opens the panel.
-        (warp nil)
-        ;; ...and its payload transfer, which is NIL until the phone's shell says hello on 104.
-        (payload-ch nil)
-        ;; ---- what the session record is built from, all three session-local on purpose: a
-        ;; global would attribute one phone's ending to another phone's route the moment two
-        ;; terminals overlap, which is the exact class of mistake this whole record exists to fix.
-        (established-at nil)                    ; when the data channel opened, or NIL if it never did
-        (away nil)                              ; the client's "going away" hint, if it arrived
-        (away-final nil)                        ; ...and whether it said it is not coming back
-        (err nil))                              ; the error that ended the session, as a short string
-    (unwind-protect
-         (handler-case
-             (progn
-               (webrtc-dtls-run conn)
-               ;; audio rides the same transport: derive SRTP keys from the DTLS session, then
-               ;; send this peer its own cursor on the DESKTOP's mix + report what it sends back.
-               ;; PRIME 2 frames of queue: this process also encodes video, so its sender thread
-               ;; gets preempted, and 40 ms of cushion is cheaper than a gap every time it does.
+;;; ---- a session, on the network loop ------------------------------------------
+;;;
+;;; ONE THREAD FOR EVERY SESSION.  This used to be a session thread per phone (DTLS, then the
+;;; datachannel loop), plus glass->ch and stats threads per open channel, plus the ICE receive and
+;;; check threads and a thread per TURN ChannelBind -- about six a session.  On a board with twelve
+;;; thread slots, all on core 0, that bought no parallelism, fitted one session, and leaked: modus
+;;; cannot destroy a thread, so every one had to notice its own end, and the ones parked in a read
+;;; did not.  Now a session is callbacks on *NET-LOOP* (cl-transport/loop): webrtc-data's
+;;; WEBRTC-START-ON-LOOP drives ICE, DTLS and SCTP; the glass socket is a WATCH; stats is a timer.
+;;; Ending it is ON-CLOSE: cancel, unwatch, close.  Nothing is left to notice.
+;;;
+;;; Media (audio, mic, VP8) still runs its own threads where it is loaded -- the desktop gateway,
+;;; not a board -- started once the handshake completes, stopped in ON-CLOSE.
+
+(defvar *net-loop* nil
+  "The CL-TRANSPORT.LOOP:EVENT-LOOP every session runs on.  START-NOSTR-GATEWAY makes one (and a
+thread to turn it) unless the host already did.")
+
+(defun ensure-net-loop ()
+  (unless *net-loop*
+    (setf *net-loop* (cl-transport.loop:make-event-loop))
+    (let ((lp *net-loop*))
+      (bt:make-thread (lambda () (cl-transport.loop:run lp)) :name "net-loop")))
+  *net-loop*)
+
+(defun %start-media (conn agent pub)
+  "Audio, microphone and video for this peer, when the media half is loaded.  Returns a function
+that stops all of it."
+  (let ((tap nil) (mic nil) (audio-stop nil) (video-stop nil) (cap nil))
+    (progn
                (setf tap (ignore-errors
                           (%opt-call "GLASS" "MAKE-AUDIO-TAP"
                            :host *audio-host* :port *audio-port*
@@ -790,186 +808,175 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
                            *video-pt* *video-qi* *video-fps* *video-max-qi* *video-target-kbs*
                            *video-max-frame-kb* *video-cleanup-ms*
                            (%opt-val "VP8" "*BACKLOG-QI*") (%opt-val "VP8" "*BACKLOG-X*")))))
-               (webrtc-serve-datachannel
-                conn :duration 3600.0
-                :alive-p (lambda () (peer-alive-p agent :away (and away (not away-final))))
-                :on-ready
-                (lambda (assoc sid)
-                  (setf glass (glass-connect) *last-assoc* assoc)
-                  (incf *sessions-ok*)
-                  ;; The session is ESTABLISHED here, and this is the clock the survival number is
-                  ;; measured from: not the offer (which includes however long ICE spent choosing)
-                  ;; but the moment the link actually started working.
-                  (setf established-at (get-internal-real-time))
-                  (format *error-output* "~&[gw-nostr] channel open -> glass ~a~%"
-                          (glass:endpoint-string :host *glass-host* :port *glass-port*))
-                  ;; glass -> browser: one message per read (SCTP fragments it)
-                  (bt:make-thread
-                   (lambda ()
-                     (let ((buf (make-array 16384 :element-type '(unsigned-byte 8))))
-                       (handler-case
-                           (loop
-                             (multiple-value-bind (b n) (sb-bsd-sockets:socket-receive glass buf nil)
-                               (declare (ignore b))
-                               (when (or (null n) (zerop n)) (return))
-                               (sctp-send-binary assoc sid (subseq buf 0 n))))
-                         (error () nil))))
-                   :name "glass->ch")
-                  ;; SCTP health: per-2s rate + cwnd/flight/outq, to spot a relay-path stall.
-                  (bt:make-thread
-                   (lambda ()
-                     (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)))
-                       ;; :ABORTED is not how a session normally ends — the datachannel loop just
-                       ;; returns — so this thread outlived every clean teardown and logged every
-                       ;; two seconds forever.  One gateway log reached 7.7M lines this way, 81% of
-                       ;; the file, from peers long gone.  PEER-ALIVE-P is false once the agent is
-                       ;; closed, which is exactly the moment this should stop.
-                       ;;
-                       ;; Asked WITHOUT the away hint, deliberately: this is the stats thread, and
-                       ;; the question it needs answered is `is the agent still up', not `does this
-                       ;; peer deserve a longer rope'.  Passing :AWAY here would keep a logger
-                       ;; running for five minutes after a pocketed phone went quiet, which is the
-                       ;; leak this loop is being fixed for.
-                       (loop until (or (eq (getf (sctp-stats assoc) :state) :aborted)
-                                       (not (peer-alive-p agent)))
-                             do
-                         (sleep 2.0)
-                         (let* ((now (sctp-stats assoc)) (tn (get-internal-real-time))
-                                (dt (max 1d-3 (/ (float (- tn tp) 1d0) internal-time-units-per-second))))
-                           (flet ((d (k) (- (or (getf now k) 0) (or (getf prev k) 0))))
-                             (format *error-output*
-                                     "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a cwnd ~a flight ~a outq ~a srtt ~a~%"
-                                     (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt) (d :rtx)
-                                     (getf now :cwnd) (getf now :flight) (getf now :send-q)
-                                     (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))))
-                           (setf prev now tp tn)))))
-                   :name "stats"))
-                :on-message
-                (lambda (assoc sid payload)
-                  ;; The phone's SECOND channel (stream 100) is control, not RFB: a quality-profile
-                  ;; switch, applied to the running sender and answered with what took effect.
-                  ;; Keeping it off the RFB stream is the point — that one is a byte protocol with
-                  ;; its own framing, and nothing here has to know how to tell the two apart.
-                  ;; ANYTHING ARRIVING MEANS THE PEER IS BACK, and clearing the hint here rather
-                  ;; than in the control branch is deliberate: a returning phone resumes VIDEO and
-                  ;; INPUT long before it has anything to say on the control channel, so waiting for
-                  ;; a control message would leave a live session still wearing `away' and holding
-                  ;; the five-minute rope instead of the thirty-second one.  Cleared BEFORE the
-                  ;; dispatch below, so an `away' message re-arms it on the same pass.
-                  (setf away nil away-final nil)
-                  (cond
-                    ((control-sid-p sid)
-                     ;; Read the going-away hint off the control stream before handing the message
-                     ;; on, so the hint costs one substring search and needs no change to the
-                     ;; control protocol's own handler.  Recorded as a TIME, not a flag, so a
-                     ;; later "it came back" could be told apart from "it never did".
-                     (when (control-away-p payload)
-                       (setf away (get-internal-real-time)
-                             away-final (control-away-final-p payload)))
-                     (handle-control-message assoc sid payload))
-                    ;; The phone's THIRD channel (stream 102) is warp: the enrolled-terminal list
-                    ;; as a delta stream, and the commands on it.  A negotiated channel has no
-                    ;; handshake, so the first message IS the open.
-                    ;;
-                    ;; This clause claims stream 102 WHETHER OR NOT WARP_CHANNEL IS SET, on
-                    ;; purpose: with the feature off WARP-ON-MESSAGE drops the bytes, and dropping
-                    ;; them is the point — gating the clause instead would let a phone that has the
-                    ;; panel, talking to a box that does not have the channel, fall through to the
-                    ;; RFB branch below and hand glass a JSON object as desktop input.
-                    ;; Streams 0 and 100 — the only two any deployed client uses — are matched
-                    ;; before and after this line exactly as they were.
-                    ((warp-sid-p sid) (setf warp (warp-on-message warp assoc sid payload pub)))
-                    ;; The phone's FOURTH channel (stream 104) is the client payload: the shell on
-                    ;; nsite asks for the rest of itself, and we push it from disk.  Claimed
-                    ;; whether or not PAYLOAD_CHANNEL is set, for the same reason 102 is — see
-                    ;; PAYLOAD-SID-P.  With the feature off the phone is answered `none`, which is
-                    ;; what lets it say so instead of spinning.
-                    ((payload-sid-p sid)
-                     (setf payload-ch (payload-on-message payload-ch assoc sid payload pub)))
-                    ((and glass (plusp (length payload)))
-                     (let ((bytes (as-u8vec payload)))
-                       ;; in video-primary mode drop FramebufferUpdateRequest (type 3, 10 bytes) so
-                       ;; glass sends no pixels over SCTP; everything else (input) passes through
-                       (if (and *video-primary* (= 10 (length bytes)) (= 3 (aref bytes 0)))
-                           nil
-                           (progn
-                             ;; AND TELL THE VIDEO SENDER, which is otherwise looking at a screen
-                             ;; that has not changed yet.  Its idle passes — sharpening what was
-                             ;; sent coarse, draining what did not fit — start once the desktop has
-                             ;; been quiet a moment, and a desktop is perfectly quiet for the whole
-                             ;; round trip between a click arriving here and the repaint coming
-                             ;; back.  That is exactly the window in which starting one puts it in
-                             ;; front of the answer.  A keystroke is the earliest warning the box
-                             ;; can have that the picture is about to change, and it is already in
-                             ;; our hands.
-                             (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-INPUT-AT*" (get-internal-real-time))
-                             ;; ... and WHERE, when the event says so.  These bytes are on their
-                             ;; way to the desktop either way; this only reads them, and only for
-                             ;; the last PointerEvent in the buffer, so the sender can know where
-                             ;; the user's attention is without anything extra crossing the link.
-                             ;; What reads it is WEBRTC-MEDIA:*CURSOR-PRIORITY*, which is off by
-                             ;; default — see its docstring for what happened when it was on.
-                             (when (%media-p) (%opt-call "WEBRTC-MEDIA" "NOTE-RFB-INPUT" bytes))
-                             (sb-bsd-sockets:socket-send glass bytes (length bytes))))))))))
-           (error (e)
-             (incf *sessions-failed*)
-             (setf *last-error* (let ((s (princ-to-string e)))
-                                  (subseq s 0 (min 72 (length s)))))
-             (setf err *last-error*)
-             (format *error-output* "~&[gw-nostr] session error: ~a~%" e)))
-      (let ((quiet (ice-silent-secs agent)))
-        (when (and quiet (>= quiet *peer-silence-limit*))
-          (format *error-output* "~&[gw-nostr] peer silent ~,0fs — closing session~%" quiet)))
-      ;; THE ROUTE AND THE ENDING, WRITTEN DOWN TOGETHER.  Everything above this line has already
-      ;; been logged separately at one time or another; what was missing was one record carrying
-      ;; both, which is what makes "which routes die frequently" a group-by.  Written to the log
-      ;; AND to the stats file, and unconditionally: a session that failed to establish is the
-      ;; one whose record is most worth having, and it is exactly the one an "on success" hook
-      ;; would drop.  Best-effort throughout — instrumentation may not be what ends a session.
-      (ignore-errors
-       (let ((rec (session-record agent :established-at established-at :away away :err err)))
-         (note-session rec)
-         (format *error-output*
-                 "~&[route] ~a ~a — ~a | offered h~a/s~a/r~a | select ~a | life ~a~@[ | changes ~a~]~@[ | silent ~ds~]~%"
-                 (or (getf rec :route) "none")
-                 (getf rec :outcome) (getf rec :cause)
-                 (getf (getf rec :offered) :host) (getf (getf rec :offered) :srflx)
-                 (getf (getf rec :offered) :relay)
-                 (let ((s (getf rec :select-s))) (if s (format nil "~,1fs" s) "never"))
-                 (let ((s (getf rec :life-s))) (if s (format nil "~,0fs" s) "-"))
-                 (let ((n (getf rec :route-changes))) (when (and n (plusp n)) n))
-                 (let ((s (getf rec :silent-s))) (when s (round s))))
-         (finish-output *error-output*)
-         ;; and into the stats file, which the video callback can no longer do: its sender is
-         ;; stopped by the time this runs.
-         (write-stats (stats-plist))))
-      (when pub (forget-session pub agent))
-      ;; This peer's warp consumer dies with the session, deliberately: its STREAM is its memory of
-      ;; what the far end holds, and a phone that comes back is a phone holding nothing.  Keeping it
-      ;; would hand the returning peer somebody else's high-water mark, which is rule 8's
-      ;; late-joiner bug with the roles reversed.  NIL when the channel was never opened.
-      (when warp (setf warp (warp-close warp)))
-      ;; ...and stop a payload transfer that is still in flight.  A phone that drops mid-transfer
-      ;; leaves a thread pushing 16 KB at a time into an association nobody is reading; the sender
-      ;; checks this between chunks and unwinds.
-      (when payload-ch (setf payload-ch (payload-close payload-ch)))
+      )
+    (lambda ()
       (when cap (ignore-errors (capture-stop cap)))
       (when video-stop (ignore-errors (funcall video-stop)))
       (when audio-stop (ignore-errors (funcall audio-stop)))
       ;; drop this peer's listening cursor (closing the connection is what unsubscribes it on the
-      ;; desktop).  The mix itself keeps running — it is the desktop's, not this session's, and
-      ;; the next dial-in joins it where it is.
+      ;; desktop); the mix itself keeps running -- it is the desktop's, not this session's
       (when tap
         (format *error-output* "~&[audio] ~a~%" (%opt-call "GLASS" "TAP-REPORT" tap))
         (ignore-errors (%opt-call "GLASS" "TAP-STOP" tap)))
-      ;; and this peer's microphone: closing the connection is what tells the desktop the
-      ;; microphone is gone, which is what sends its ear back to whatever it was listening to
+      ;; and this peer's microphone: closing it is what sends the desktop's ear back
       (when mic
         (format *error-output* "~&[mic] ~a~%" (%opt-call "GLASS" "MIC-SENDER-REPORT" mic))
-        (ignore-errors (%opt-call "GLASS" "MIC-SENDER-STOP" mic)))
-      (when glass (ignore-errors (sb-bsd-sockets:socket-close glass)))
-      (ignore-errors (ice-close agent)))))   ; release the TURN allocation + ICE socket
+        (ignore-errors (%opt-call "GLASS" "MIC-SENDER-STOP" mic))))))
 
+(defun %glass-pump (assoc sid glass link)
+  "Glass -> browser: one SCTP message per read, without waiting.  While SCTP's queue is at its
+bound the glass socket is not read at all -- unwatched, and re-watched by the stats tick once the
+queue drains -- which is the backpressure SCTP-SEND-DATA's wait used to give a thread."
+  (let ((buf (make-array 16384 :element-type '(unsigned-byte 8))) (lp *net-loop*))
+    (labels ((read-some (sock)
+               (if (sctp-backlogged-p assoc)
+                   (cl-transport.loop:unwatch lp sock)
+                   (multiple-value-bind (b n)
+                       (handler-case (sb-bsd-sockets:socket-receive sock buf nil)
+                         (error () (values nil 0)))
+                     (declare (ignore b))
+                     (cond ((null n))                                   ; nothing after all
+                           ((zerop n) (webrtc-close-on-loop link "glass closed"))
+                           (t (sctp-send-binary assoc sid (subseq buf 0 n))))))))
+      (setf (sb-bsd-sockets:non-blocking-mode glass) t)
+      (cl-transport.loop:watch lp glass #'read-some :what "glass->ch")
+      #'read-some)))
+
+(defun run-session (conn agent &key pub)
+  "Run this peer's session on *NET-LOOP*: DTLS, the data channel, and the bridge to glass once
+the channel opens.  Returns at once; ON-CLOSE (below) is the teardown, and it closes AGENT so the
+TURN allocation is released (not leaked for ~600s)."
+  (let ((glass nil) (pump nil) (stats nil) (media-stop nil)
+        ;; This peer's warp channel, or NIL -- which is what it stays unless the phone sends on
+        ;; stream 102, which it only does if somebody opens the panel.
+        (warp nil)
+        ;; ...and its payload transfer, which is NIL until the phone's shell says hello on 104.
+        (payload-ch nil)
+        ;; ---- what the session record is built from, all session-local on purpose: a global
+        ;; would attribute one phone's ending to another phone's route the moment two terminals
+        ;; overlap, which is the exact class of mistake this whole record exists to fix.
+        (established-at nil)                    ; when the data channel opened, or NIL if it never did
+        (away nil)                              ; the client's "going away" hint, if it arrived
+        (away-final nil)                        ; ...and whether it said it is not coming back
+        (lp *net-loop*))
+    (setf (gethash agent *links*)
+    (webrtc-start-on-loop
+     conn lp
+     :duration 3600.0
+     :alive-p (lambda () (peer-alive-p agent :away (and away (not away-final))))
+     :on-established
+     (lambda (link assoc)
+       (declare (ignore link assoc))
+       (when (%media-p) (setf media-stop (%start-media conn agent pub))))
+     :on-ready
+     (lambda (assoc sid)
+       (setf glass (glass-connect) *last-assoc* assoc)
+       (incf *sessions-ok*)
+       ;; The session is ESTABLISHED here, and this is the clock the survival number is measured
+       ;; from: not the offer (which includes however long ICE spent choosing) but the moment the
+       ;; link actually started working.
+       (setf established-at (get-internal-real-time))
+       (format *error-output* "~&[gw-nostr] channel open -> glass ~a~%"
+               (glass:endpoint-string :host *glass-host* :port *glass-port*))
+       (let ((link (%current-link agent)))
+         (setf pump (%glass-pump assoc sid glass link))
+         ;; SCTP health every 2 s (per-2s rate + cwnd/flight/outq, to spot a relay-path stall) --
+         ;; and the tick that re-watches glass once a backlog has drained.
+         (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)))
+           (setf stats
+                 (cl-transport.loop:every-seconds
+                  lp 2.0
+                  (lambda ()
+                    (unless (or (sctp-backlogged-p assoc)
+                                (cl-transport.loop:watching-p lp glass))
+                      (cl-transport.loop:watch lp glass pump :what "glass->ch"))
+                    (let* ((now (sctp-stats assoc)) (tn (get-internal-real-time))
+                           (dt (max 1d-3 (/ (float (- tn tp) 1d0) internal-time-units-per-second))))
+                      (flet ((d (k) (- (or (getf now k) 0) (or (getf prev k) 0))))
+                        (format *error-output*
+                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a cwnd ~a flight ~a outq ~a srtt ~a~%"
+                                (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt) (d :rtx)
+                                (getf now :cwnd) (getf now :flight) (getf now :send-q)
+                                (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))))
+                      (setf prev now tp tn)))
+                  :what "session stats")))))
+     :on-message
+     (lambda (assoc sid payload)
+       ;; ANYTHING ARRIVING MEANS THE PEER IS BACK: a returning phone resumes input long before it
+       ;; has anything to say on the control channel, so the away hint is cleared here, BEFORE the
+       ;; dispatch, and an `away' message re-arms it on the same pass.
+       (setf away nil away-final nil)
+       ;; glass tells the bridge when it can take more: a read that was skipped for a full queue
+       (when (and pump glass (not (sctp-backlogged-p assoc))
+                  (not (cl-transport.loop:watching-p lp glass)))
+         (cl-transport.loop:watch lp glass pump :what "glass->ch"))
+       (cond
+         ;; stream 100 is control (a quality-profile switch, and the going-away hint), kept off
+         ;; the RFB stream so nothing has to tell the two apart
+         ((control-sid-p sid)
+          (when (control-away-p payload)
+            (setf away (get-internal-real-time)
+                  away-final (control-away-final-p payload)))
+          (handle-control-message assoc sid payload))
+         ;; stream 102 is warp, claimed WHETHER OR NOT WARP_CHANNEL IS SET -- with the feature
+         ;; off WARP-ON-MESSAGE drops the bytes, which is the point: otherwise a phone with the
+         ;; panel would hand glass a JSON object as desktop input
+         ((warp-sid-p sid) (setf warp (warp-on-message warp assoc sid payload pub)))
+         ;; stream 104 is the client payload, claimed whether or not PAYLOAD_CHANNEL is set
+         ((payload-sid-p sid)
+          (setf payload-ch (payload-on-message payload-ch assoc sid payload pub)))
+         ((and glass (plusp (length payload)))
+          (let ((bytes (as-u8vec payload)))
+            ;; in video-primary mode drop FramebufferUpdateRequest (type 3, 10 bytes) so glass
+            ;; sends no pixels over SCTP; everything else (input) passes through
+            (unless (and *video-primary* (= 10 (length bytes)) (= 3 (aref bytes 0)))
+              ;; AND TELL THE VIDEO SENDER: a keystroke is the earliest warning the box can have
+              ;; that the picture is about to change
+              (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-INPUT-AT*" (get-internal-real-time))
+              (when (%media-p) (%opt-call "WEBRTC-MEDIA" "NOTE-RFB-INPUT" bytes))
+              (sb-bsd-sockets:socket-send glass bytes (length bytes)))))))
+     :on-close
+     (lambda (link reason)
+       (let ((err (unless (eq reason :done) (princ-to-string reason))))
+         (when err
+           (incf *sessions-failed*)
+           (setf *last-error* (subseq err 0 (min 72 (length err))))
+           (format *error-output* "~&[gw-nostr] session error: webrtc-data: ~a~%" err))
+         (let ((quiet (ice-silent-secs agent)))
+           (when (and quiet (>= quiet *peer-silence-limit*))
+             (format *error-output* "~&[gw-nostr] peer silent ~,0fs — closing session~%" quiet)))
+         ;; THE ROUTE AND THE ENDING, WRITTEN DOWN TOGETHER, unconditionally: a session that
+         ;; failed to establish is the one whose record is most worth having.  Best-effort --
+         ;; instrumentation may not be what ends a session.
+         (ignore-errors
+          (let ((rec (session-record agent :established-at established-at :away away
+                                           :err (and err (subseq err 0 (min 72 (length err)))))))
+            (note-session rec)
+            (format *error-output*
+                    "~&[route] ~a ~a — ~a | offered h~a/s~a/r~a | select ~a | life ~a~@[ | changes ~a~]~@[ | silent ~ds~]~%"
+                    (or (getf rec :route) "none")
+                    (getf rec :outcome) (getf rec :cause)
+                    (getf (getf rec :offered) :host) (getf (getf rec :offered) :srflx)
+                    (getf (getf rec :offered) :relay)
+                    (let ((s (getf rec :select-s))) (if s (format nil "~,1fs" s) "never"))
+                    (let ((s (getf rec :life-s))) (if s (format nil "~,0fs" s) "-"))
+                    (let ((n (getf rec :route-changes))) (when (and n (plusp n)) n))
+                    (let ((s (getf rec :silent-s))) (when s (round s))))
+            (finish-output *error-output*)
+            (write-stats (stats-plist))))
+         (when pub (forget-session pub agent))
+         (%forget-link agent link)
+         ;; This peer's warp consumer dies with the session: its STREAM is its memory of what the
+         ;; far end holds, and a phone that comes back is a phone holding nothing.
+         (when warp (setf warp (warp-close warp)))
+         ;; ...and stop a payload transfer that is still in flight.
+         (when payload-ch (setf payload-ch (payload-close payload-ch)))
+         (when media-stop (ignore-errors (funcall media-stop)))
+         (cl-transport.loop:cancel lp stats)
+         (when glass
+           (cl-transport.loop:unwatch lp glass)
+           (ignore-errors (sb-bsd-sockets:socket-close glass)))
+         (ignore-errors (ice-close agent))))))))  ; release the TURN allocation + ICE socket
 
 ;;; ---- replay defence ----------------------------------------------------------
 ;; The subscription asks each relay for :limit 20 of the backlog, and the pool reconnects on an idle
@@ -1011,10 +1018,12 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
              (let ((n (and (eql 0 (search "100." ip)) (second-octet 4))))
                (and n (<= 64 n 127)))))))
 
-(defun process-offer (offer-sdp &key pub (at 0))
-  "Parse an SDP OFFER, run the answerer (srflx + full-agent checks for off-LAN), spawn the
-   glass-bridged session, and return the ANSWER SDP.  PUB is the offering terminal, whose previous
-   session is retired first — before we allocate, so its relay port is free for reuse."
+(defun process-offer (offer-sdp on-answer &key pub (at 0))
+  "Answer an SDP OFFER on *NET-LOOP*: retire PUB's previous session, gather (srflx + TURN relay,
+concurrently), start this session, and call ON-ANSWER with the answer SDP -- or with NIL when the
+offer is ignored (older than the live session).  Runs on the loop's thread; returns at once.  PUB
+is the offering terminal, whose previous session is retired first -- before we allocate, so its
+relay port is free for reuse."
   (let* ((probe (parse-sdp offer-sdp))
          (ufrag (sdp-ice-ufrag probe))
          (dup (and pub ufrag
@@ -1024,7 +1033,7 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
       (format t "~&@@ duplicate offer from ~a... (ufrag ~a) — re-sending the same answer~%"
               (subseq pub 0 8) ufrag)
       (finish-output)
-      (return-from process-offer (sess-answer dup))))
+      (return-from process-offer (funcall on-answer (sess-answer dup)))))
   ;; Supersede only for an offer at least as new as the live one.  Without this a replay retires a
   ;; live session; with it, an out-of-order replay is simply ignored.
   (when pub
@@ -1034,92 +1043,99 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
             (t (format t "~&@@ ignoring offer older than the live session for ~a... (~a < ~a)~%"
                        (subseq pub 0 8) at (sess-at live))
                (finish-output)
-               (return-from process-offer nil)))))
+               (return-from process-offer (funcall on-answer nil))))))
   (let* ((offer (parse-sdp offer-sdp))
          (agent (make-ice :local-ip (uiop:getenv "ICE_LOCAL_IP")))
-         (conn  (webrtc-dtls-setup agent :remote-fingerprint (sdp-fingerprint offer)))
-         (answer (ice-answer agent offer :fingerprint (dtls-conn-fingerprint conn)
-                             :gather-srflx t                    ; advertise our public mapping
-                             ;; a plist -> ice-gather-relay keys; a longer timeout so the Allocate
-                             ;; reliably completes (2s was racy under load).
-                             :gather-relay (and (uiop:getenv "TURN_SERVER") (list :timeout 6.0)))))
-    ;; A missing relay candidate is THE failure that kills cellular: without it a hard-NAT peer has
-    ;; no pairable path at all, and the symptom ("no ICE peer within 20s") appears 20 s later at the
-    ;; far end, which is a terrible place to learn it.  So if gathering produced no relay, retry once
-    ;; — an Allocate lost to a single dropped packet is worth ~150 ms to recover — and if it still
-    ;; fails, say so loudly and count it.
-    (when (and (uiop:getenv "TURN_SERVER") (null (ice-agent-relay-ip agent)))
-      (format t "~&@@ WARN no relay candidate — retrying TURN allocate~%")
-      (finish-output)
-      (ignore-errors (ice-gather-relay agent :timeout 6.0))
-      (unless (ice-agent-relay-ip agent)
-        (incf *no-relay-count*)
-        (setf *last-error* "no relay candidate (cellular peers cannot pair)")
-        (format t "~&@@ ERROR still no relay candidate: a hard-NAT peer WILL fail to connect~%")
-        (finish-output)))
-    ;; What we actually advertised: without a relay line a hard-NAT (cellular) peer has no
-    ;; pairable path, so log it per answer — this is the first thing to check on "ice failed".
-    (format t "~&@@ ice: srflx=~a:~a relay=~a:~a  peer-cands=~a~%"
-            (ice-agent-srflx-ip agent) (ice-agent-srflx-port agent)
-            (ice-agent-relay-ip agent) (ice-agent-relay-port agent)
-            (length (ice-agent-remote-candidates agent)))
-    ;; A COUNT of peer candidates says nothing about whether any is reachable, so
-    ;; "ice failed" has no next question.  What decides it is whether the peer
-    ;; offered an address on OUR network: if it did, a host pair should work and
-    ;; the fault is local; if every candidate is public, the phone is elsewhere
-    ;; and only a relay will ever pair.  Say which.
-    (let* ((cands (ice-agent-remote-candidates agent))
-           (ips (remove-duplicates (mapcar #'ice-candidate-ip cands) :test #'equal))
-           (ours (ice-agent-local-ip agent))
-           (prefix (and (stringp ours)
-                        (let ((d (position #\. ours :from-end t)))
-                          (and d (subseq ours 0 (1+ d))))))
-           (same-net (and prefix (remove-if-not (lambda (ip) (eql 0 (search prefix ip))) ips)))
-           (mdns (remove-if-not (lambda (ip) (search ".local" ip)) ips))
-           (private (remove-if-not #'%private-ip-p ips))
-           (public (set-difference (remove-if #'%private-ip-p ips) mdns :test #'equal)))
-      (format t "@@ peer: ~d addresses — ~d private, ~d public~@[, ~d mDNS~]~
-                 ~@[; on our /24: ~{~a~^ ~}~]~%"
-              (length ips) (length private) (length public)
-              (and mdns (length mdns)) same-net)
-      (unless same-net
-        (format t "@@ peer: nothing on ~a0/24 — no host pair is possible; this needs a relay~%"
-                (or prefix "our network")))
-      ;; An mDNS name is not an address: browsers replace host candidates with
-      ;; random .local hostnames for privacy, and they resolve only by multicast
-      ;; DNS on the peer's own link.  They are counted apart from "public" because
-      ;; we cannot dial one, and TURN cannot be given a permission for one: that is
-      ;; how an allocated relay still pairs with nothing.
-      (when mdns
-        (format t "@@ peer: ~d mDNS .local names — unresolvable here, and TURN cannot~%~
-                   @@ peer: hold a permission for a name, so those cannot pair~%"
-                (length mdns)))
-      (when public
-        (format t "@@ peer: routable ~{~a~^ ~}~%"
-                (subseq public 0 (min 4 (length public)))))
-      ;; The candidate TYPES are what say whether the phone gathered at all: only
-      ;; host means its own STUN/TURN never answered (or the offer was sent before
-      ;; gathering finished), and no amount of relay on our side fixes that.
-      (let ((types (make-hash-table :test 'equal)))
-        (dolist (c cands)
-          (incf (gethash (or (ice-candidate-type c) "?") types 0)))
-        (format t "@@ peer: types~{ ~a~}~%"
-                (let (acc) (maphash (lambda (k v) (push (format nil "~a=~d" k v) acc)) types) acc))
-        (unless (or (gethash "srflx" types) (gethash "relay" types))
-          (format t "@@ peer: no srflx and no relay from the phone — it gathered only host~%~
-                     @@ peer: candidates, so nothing it offered is reachable from here~%")))
-      (finish-output))
-    (ice-serve agent)
-    (ice-start-checks agent)                                    ; punch our NAT toward the phone
-    (setf *video-pt*                                            ; VP8 pt from the offer, if it wants video
-          (let ((v (find "video" (sdp-media offer) :key #'sdp-media-type :test #'string=)))
-            (and v (sdp-media-codec-pt v "VP8"))))
-    (when pub
-      (bt:with-lock-held (*live-lock*)
-        (setf (gethash pub *live*)
-              (make-sess :ufrag (sdp-ice-ufrag offer) :agent agent :answer answer :at at))))
-    (bt:make-thread (lambda () (run-session conn agent :pub pub)) :name "webrtc-session")
-    answer))
+         (conn  (webrtc-dtls-setup agent :remote-fingerprint (sdp-fingerprint offer))))
+    (ice-answer-on-loop
+     agent offer *net-loop*
+     (lambda (answer)
+       ;; A missing relay candidate is THE failure that kills cellular: without it a hard-NAT
+       ;; peer has no pairable path at all, and the symptom appears minutes later at the far end.
+       ;; The Allocate already retransmitted for its whole timeout; say so loudly and count it.
+       (when (and (uiop:getenv "TURN_SERVER") (null (ice-agent-relay-ip agent)))
+         (incf *no-relay-count*)
+         (setf *last-error* "no relay candidate (cellular peers cannot pair)")
+         (format t "~&@@ ERROR no relay candidate: a hard-NAT peer WILL fail to connect~%")
+         (finish-output))
+       (format t "~&@@ ice: srflx=~a:~a relay=~a:~a  peer-cands=~a~%"
+               (ice-agent-srflx-ip agent) (ice-agent-srflx-port agent)
+               (ice-agent-relay-ip agent) (ice-agent-relay-port agent)
+               (length (ice-agent-remote-candidates agent)))
+       ;; A COUNT of peer candidates says nothing about whether any is reachable, so
+       ;; "ice failed" has no next question.  What decides it is whether the peer
+       ;; offered an address on OUR network: if it did, a host pair should work and
+       ;; the fault is local; if every candidate is public, the phone is elsewhere
+       ;; and only a relay will ever pair.  Say which.
+       (let* ((cands (ice-agent-remote-candidates agent))
+              (ips (remove-duplicates (mapcar #'ice-candidate-ip cands) :test #'equal))
+              (ours (ice-agent-local-ip agent))
+              (prefix (and (stringp ours)
+                           (let ((d (position #\. ours :from-end t)))
+                             (and d (subseq ours 0 (1+ d))))))
+              (same-net (and prefix (remove-if-not (lambda (ip) (eql 0 (search prefix ip))) ips)))
+              (mdns (remove-if-not (lambda (ip) (search ".local" ip)) ips))
+              (private (remove-if-not #'%private-ip-p ips))
+              (public (set-difference (remove-if #'%private-ip-p ips) mdns :test #'equal)))
+         (format t "@@ peer: ~d addresses — ~d private, ~d public~@[, ~d mDNS~]~
+                    ~@[; on our /24: ~{~a~^ ~}~]~%"
+                 (length ips) (length private) (length public)
+                 (and mdns (length mdns)) same-net)
+         (unless same-net
+           (format t "@@ peer: nothing on ~a0/24 — no host pair is possible; this needs a relay~%"
+                   (or prefix "our network")))
+         ;; An mDNS name is not an address: browsers replace host candidates with
+         ;; random .local hostnames for privacy, and they resolve only by multicast
+         ;; DNS on the peer's own link.  They are counted apart from "public" because
+         ;; we cannot dial one, and TURN cannot be given a permission for one: that is
+         ;; how an allocated relay still pairs with nothing.
+         (when mdns
+           (format t "@@ peer: ~d mDNS .local names — unresolvable here, and TURN cannot~%~
+                      @@ peer: hold a permission for a name, so those cannot pair~%"
+                   (length mdns)))
+         (when public
+           (format t "@@ peer: routable ~{~a~^ ~}~%"
+                   (subseq public 0 (min 4 (length public)))))
+         ;; The candidate TYPES are what say whether the phone gathered at all: only
+         ;; host means its own STUN/TURN never answered (or the offer was sent before
+         ;; gathering finished), and no amount of relay on our side fixes that.
+         (let ((types (make-hash-table :test 'equal)))
+           (dolist (c cands)
+             (incf (gethash (or (ice-candidate-type c) "?") types 0)))
+           (format t "@@ peer: types~{ ~a~}~%"
+                   (let (acc) (maphash (lambda (k v) (push (format nil "~a=~d" k v) acc)) types) acc))
+           (unless (or (gethash "srflx" types) (gethash "relay" types))
+             (format t "@@ peer: no srflx and no relay from the phone — it gathered only host~%~
+                        @@ peer: candidates, so nothing it offered is reachable from here~%")))
+         (finish-output))
+       (ice-start-checks-on-loop agent)                        ; punch our NAT toward the phone
+       (setf *video-pt*                                        ; VP8 pt from the offer, if it wants video
+             (let ((v (find "video" (sdp-media offer) :key #'sdp-media-type :test #'string=)))
+               (and v (sdp-media-codec-pt v "VP8"))))
+       (when pub
+         (bt:with-lock-held (*live-lock*)
+           (setf (gethash pub *live*)
+                 (make-sess :ufrag (sdp-ice-ufrag offer) :agent agent :answer answer :at at))))
+       (run-session conn agent :pub pub)
+       (funcall on-answer answer))
+     :fingerprint (dtls-conn-fingerprint conn)
+     :gather-srflx t                                          ; advertise our public mapping
+     ;; a plist -> the relay gatherer's keys: a longer timeout so the Allocate reliably
+     ;; completes (2s was racy under load)
+     :gather-relay (and (uiop:getenv "TURN_SERVER") (list :timeout 6.0)))
+    nil))
+
+;;; ---- the outbox: work the network loop hands back to the relay thread ---------
+;;; The relays belong to the thread that pumps them (on modus there are no reader threads: whoever
+;;; calls PUMP services them), so a publish is made there and nowhere else.
+(defvar *outbox* '())
+(defvar *outbox-lock* (bt:make-lock "gateway outbox"))
+(defun %outbox-push (fn) (bt:with-lock-held (*outbox-lock*) (push fn *outbox*)) t)
+(defun %outbox-drain ()
+  (let ((fns (bt:with-lock-held (*outbox-lock*) (prog1 (reverse *outbox*) (setf *outbox* '())))))
+    (dolist (fn fns)
+      (handler-case (funcall fn)
+        (error (e) (format t "~&@@ outbox error: ~a~%" e) (finish-output))))))
 
 ;;; ---- Nostr signaling loop --------------------------------------------------
 ;;; A FUNCTION, so a board can start it when its network and identity are up.  The desktop
@@ -1158,6 +1174,9 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
  ;; is inactive, so the browser shows the RFB view instead of waiting on a track (webrtc-data
  ;; *ANSWER-VIDEO*).  This was the RFB-mode `stall': the desktop was arriving all along.
  (setf webrtc-data::*answer-video* (%media-p))
+ ;; every session runs on the network loop -- made here, with its thread, unless the host
+ ;; (a board's boot) already made one
+ (ensure-net-loop)
  (let* ((kp      (cl-nostr.keys:keypair-from-secret *box-secret*))
        (box-pub (cl-nostr.keys:public-hex kp))
        (box-npub (ignore-errors (cl-nostr.bech32:npub-encode (cl-nostr.keys:public-key-of-secret *box-secret*))))
@@ -1264,8 +1283,18 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
                      (format t "~&@@ offer from ~a... (via ~(~a~)) -> answering~%"
                              (subseq phone-pub 0 8) via)
                      (finish-output)
-                     (let* ((answer (process-offer offer-sdp :pub phone-pub :at rumor-at))
-                            ;; NIL means the offer was ignored (older than the live session) — there
+                     ;; THE LOOP ANSWERS; THIS THREAD PUBLISHES.  The session is the network loop's
+                     ;; (gathering, ICE, DTLS, SCTP), but the relays are this thread's, so the
+                     ;; answer comes back through the outbox, which the pump below drains.
+                     (cl-transport.loop:post
+                      *net-loop*
+                      (lambda ()
+                        (process-offer
+                         offer-sdp
+                         (lambda (answer)
+                           (%outbox-push
+                            (lambda ()
+                     (let* (;; NIL means the offer was ignored (older than the live session) — there
                             ;; is nothing to reply with, and replying NIL would hand the phone a
                             ;; malformed answer.
                             (skip (null answer))
@@ -1310,7 +1339,8 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
                                                                         :after rumor-at))))
                        (when reply (cl-nostr.pool:pool-publish pool reply))
                        (format t "@@ answer gift-wrapped -> ~a...~%" (subseq phone-pub 0 8))
-                       (finish-output))))))
+                       (finish-output)))))
+                         :pub phone-pub :at rumor-at)))))))
                ;; ---- anything that is not an offer ----
                ;; A command DM lands here, and this file does NOTHING with it: the desktop's
                ;; :glass/nostr bot is subscribed to the same box pubkey for the same kind and is
@@ -1330,6 +1360,7 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
   ;; offer ever reached the handler above.  On SBCL it sleeps, which is what this did.
   (let ((deadline (+ (get-universal-time) *ready-timeout*)))
     (loop (cl-nostr.relay:pump 5)
+          (%outbox-drain)
           (when (> (get-universal-time) deadline) (%gateway-ready))))))
 
 ;; The desktop gateway: loading this file is starting it (kiln, gw-keepalive.sh).
