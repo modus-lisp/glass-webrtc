@@ -1128,10 +1128,31 @@ Closes AGENT on exit so its TURN allocation is released (not leaked for ~600s)."
   "How many stored gift wraps to ask the relays for at subscription.  Every one is unwrapped (two
 NIP-44 decryptions and a signature check) before a fresh offer behind it is seen: nothing on a
 desktop, seconds EACH on a Pi Zero, so a box with a history answered its next phone minutes
-late.  A gift wrap's created_at is randomised, so the backlog cannot be cut by time; the board
-asks for fewer (kiln boot/zero-gateway.lisp).")
+late.  A gift wrap's created_at is randomised up to two days back, so time cuts the backlog only
+to that window (the :SINCE below); the board also asks for fewer (kiln boot/zero-gateway.lisp).")
+
+(defvar *on-ready* nil
+  "Called once, with no arguments, when the gateway can answer a live offer: the first relay has
+sent its stored set (EOSE) and, every event being handled inline in the pump, that set has been
+unwrapped.  Or after *READY-TIMEOUT* seconds with no EOSE, so one dead relay cannot hold it.  A
+board sends its owner's login link from here: a link DM'd before this point is a phone offering to
+a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
+
+(defparameter *ready-timeout* 120)
+
+(defvar *ready-fired* nil)
+
+(defun %gateway-ready ()
+  (unless *ready-fired*
+    (setf *ready-fired* t)
+    (format t "~&@@ ready: answering live offers~%")
+    (finish-output)
+    (when *on-ready*
+      (handler-case (funcall *on-ready*)
+        (error (e) (format t "~&@@ ready hook failed: ~a~%" e) (finish-output))))))
 
 (defun start-nostr-gateway ()
+ (setf *ready-fired* nil)
  (unless *box-secret* (setf *box-secret* (%read-box-secret)))
  ;; NO VIDEO PROMISED WITHOUT A VIDEO SENDER: without the media stack the answer's video m-line
  ;; is inactive, so the browser shows the RFB view instead of waiting on a track (webrtc-data
@@ -1205,6 +1226,7 @@ asks for fewer (kiln boot/zero-gateway.lisp).")
    (list (cl-nostr.filter:make-filter :kinds '(1059) :tags (list (cons "p" (list box-pub)))
                                       :since (- (%unix-now) 172800)
                                       :limit *offer-backlog*))
+   :on-eose (lambda (relay) (declare (ignore relay)) (%gateway-ready))
    :on-event
    (lambda (wrap relay)
      (declare (ignore relay))
@@ -1306,7 +1328,9 @@ asks for fewer (kiln boot/zero-gateway.lisp).")
   ;; PUMP, not SLEEP: on modus cl-nostr has no reader threads -- every open relay (this pool's
   ;; and the desktop's DM bot's) is serviced by whoever calls PUMP, and nobody else did, so no
   ;; offer ever reached the handler above.  On SBCL it sleeps, which is what this did.
-  (loop (cl-nostr.relay:pump 5))))
+  (let ((deadline (+ (get-universal-time) *ready-timeout*)))
+    (loop (cl-nostr.relay:pump 5)
+          (when (> (get-universal-time) deadline) (%gateway-ready))))))
 
 ;; The desktop gateway: loading this file is starting it (kiln, gw-keepalive.sh).
 (unless (%lean-p) (start-nostr-gateway))
