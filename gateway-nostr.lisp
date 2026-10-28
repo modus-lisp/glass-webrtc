@@ -224,6 +224,46 @@ including to ask it as somebody else — was a process on this machine.")
 (defvar *devices-known* 0)
 (defvar *admission-refusals* 0 "Offers refused because the desktop could not be asked.")
 
+;; IN-PROCESS WHEN THE DESKTOP IS HERE.  The admission protocol is a loopback round trip because
+;; the desktop and the gateway were two processes; on a board they are one image, and every offer
+;; cost the desktop a client THREAD -- and modus never gives an exited thread's slot back, so a
+;; handful of offers used up the board.  When this image runs the service, the question goes to
+;; the same ADMISSION-SERVE the socket would have reached, through the same line format both ways
+;; (so the answer is exactly the one the wire would carry).  Otherwise it is the socket as before.
+(defun %local-admission ()
+  (and (boundp 'glass::*session-admission-service*) glass::*session-admission-service*))
+
+(defun %admission-ask (verb &rest params)
+  "(values STATUS PLIST) like GLASS::ADMISSION-REQUEST, without a socket when the service is here."
+  (let ((srv (%local-admission)))
+    (if (null srv)
+        (apply #'glass::admission-request verb :host *admission-host* :port *admission-port* params)
+        (handler-case
+            (multiple-value-bind (v p) (glass::%net-params (apply #'glass::%net-line verb params))
+              (let ((reply (glass::admission-serve (or v "") p)))
+                (multiple-value-bind (status plist) (glass::%net-params reply)
+                  (sb-thread:with-mutex ((glass::admission-service-lock srv))
+                    (incf (glass::admission-service-served srv))
+                    (when (eq verb :admit)
+                      (if (equal status "ok")
+                          (incf (glass::admission-service-admitted srv))
+                          (incf (glass::admission-service-denied srv)))))
+                  (values (intern (string-upcase (or status "err")) :keyword) plist))))
+          (serious-condition (e) (values :err (list :reason (princ-to-string e))))))))
+
+(defun %admission-admit (pubkey code)
+  "GLASS:ADMISSION-ADMIT's three values, asked through %ADMISSION-ASK."
+  (multiple-value-bind (status plist) (%admission-ask :admit :pub pubkey :code code)
+    (case status
+      (:ok (values (intern (string-upcase (or (getf plist :via) "device")) :keyword)
+                   (getf plist :token) plist))
+      (:unreachable (values nil :unreachable plist))
+      (t (values nil (intern (string-upcase (or (getf plist :reason) "denied")) :keyword) plist)))))
+
+(defun %admission-mint (pubkey)
+  (multiple-value-bind (status plist) (%admission-ask :mint :pub pubkey)
+    (and (eq status :ok) (getf plist :token))))
+
 (defun ask-admission (pubkey code)
   "Ask the desktop whether PUBKEY, holding CODE, may connect.  Returns (values VIA TOKEN EXPIRES):
 
@@ -243,7 +283,7 @@ including to ask it as somebody else — was a process on this machine.")
 FAILS CLOSED.  A service that cannot be reached refuses the offer and says so loudly, naming the
 port, because a silent refusal here would be diagnosed for an hour in the wrong process."
   (multiple-value-bind (via token plist)
-      (glass:admission-admit pubkey code :host *admission-host* :port *admission-port*)
+      (%admission-admit pubkey code)
     (let ((n (and plist (ignore-errors (parse-integer (getf plist :devices))))))
       (when n (setf *devices-known* n)))
     (when (eq token :unreachable)
@@ -287,7 +327,7 @@ port, because a silent refusal here would be diagnosed for an hour in the wrong 
     ;; admissions only, which are the owner's own logins and rare.
     (when (and (eq via :allowlist) (not (stringp token)))
       (let ((minted (ignore-errors
-                     (glass:admission-mint pubkey :host *admission-host* :port *admission-port*))))
+                     (%admission-mint pubkey))))
         (when (stringp minted)
           (setf token minted)
           (format t "~&@@ allowlist ~a... — minted a device credential to ride the answer~%"
@@ -1195,7 +1235,9 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
   ;; a gateway that refuses every offer for an hour without ever having said the service was down
   ;; is the failure mode that makes fail-closed a bad idea.  It is a report, not a gate: the
   ;; gateway starts either way, and the desktop may simply not be up yet.
-  (let ((posture (glass:admission-ping :host *admission-host* :port *admission-port*)))
+  (let ((posture (if (%local-admission)
+                       (multiple-value-bind (st pl) (%admission-ask :ping) (and (eq st :ok) pl))
+                       (glass:admission-ping :host *admission-host* :port *admission-port*))))
     (if posture
         (progn
           (format t "@@ admission:  ~a — ~a enrolled, ~a allowed, device ttl ~ah~%"
