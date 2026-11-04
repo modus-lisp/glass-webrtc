@@ -33,7 +33,7 @@
       (load setup)))
   (handler-bind ((warning #'muffle-warning))
     (let ((*standard-output* (make-broadcast-stream)))
-      (funcall (read-from-string "ql:quickload") '(:cl-nostr :ironclad))))
+      (funcall (read-from-string "ql:quickload") '(:cl-nostr))))
   (load (merge-pathnames "login-token.lisp" here)))
 
 (defpackage #:login-link-cli (:use #:cl))

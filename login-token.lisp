@@ -43,17 +43,21 @@
 (defconstant +unix-epoch+ 2208988800)
 (defun %now () (- (get-universal-time) +unix-epoch+))
 
+(defun %u8 (n) (make-array n :element-type '(unsigned-byte 8)))
+(defun %hex (bytes) (format nil "~(~{~2,'0x~}~)" (coerce bytes 'list)))
+
 (defun %secret-bytes (secret)
   "SECRET as 64-hex string, bytes, or integer -> (unsigned-byte 8) vector."
   (etypecase secret
-    (string (ironclad:hex-string-to-byte-array secret))
-    (integer (ironclad:integer-to-octets secret :n-bits 256))
-    (sequence (coerce secret '(vector (unsigned-byte 8))))))
+    (string (let ((v (%u8 (floor (length secret) 2))))
+              (dotimes (i (length v) v)
+                (setf (aref v i) (parse-integer secret :start (* 2 i) :end (+ 2 (* 2 i)) :radix 16)))))
+    (integer (let ((v (%u8 32)))             ; 256 bits, big-endian
+               (dotimes (i 32 v) (setf (aref v (- 31 i)) (ldb (byte 8 (* 8 i)) secret)))))
+    (sequence (coerce secret '(simple-array (unsigned-byte 8) (*))))))
 
 (defun %hmac-hex (key-bytes message)
-  (let ((m (ironclad:make-mac :hmac key-bytes :sha256)))
-    (ironclad:update-mac m (ironclad:ascii-string-to-byte-array message))
-    (ironclad:byte-array-to-hex-string (ironclad:produce-mac m))))
+  (%hex (natrium:hmac-sha256 key-bytes (map '(simple-array (unsigned-byte 8) (*)) #'char-code message))))
 
 (defun %mac (secret nonce exp)
   (%hmac-hex (%secret-bytes secret) (format nil "glass-login|~a|~a" nonce exp)))
@@ -68,7 +72,7 @@
 
 (defun mint-token (secret &key (ttl *default-ttl*))
   "Mint a one-time login code valid for TTL seconds, keyed by box SECRET."
-  (let* ((nonce (ironclad:byte-array-to-hex-string (ironclad:random-data 16)))
+  (let* ((nonce (%hex (natrium:random-bytes 16)))
          (exp   (+ (%now) ttl)))
     (format nil "~a.~a.~a" nonce exp (%mac secret nonce exp))))
 

@@ -142,8 +142,8 @@ RFB and video keep interleaving normally.")
 (defvar *payload-lock* (bt:make-lock "payload-file"))
 
 (defun %sha256-hex (bytes)
-  (string-downcase (ironclad:byte-array-to-hex-string
-                    (ironclad:digest-sequence :sha256 bytes))))
+  (format nil "~(~{~2,'0x~}~)"
+          (coerce (natrium:sha256 (coerce bytes '(simple-array (unsigned-byte 8) (*)))) 'list)))
 
 (defun %read-file-bytes (path)
   "PATH's contents as a byte vector, or NIL if it cannot be read.  Never signals."
