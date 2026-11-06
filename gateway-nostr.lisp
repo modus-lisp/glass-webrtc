@@ -752,13 +752,42 @@ CAUSE is the single most important field and it is ordered most-specific-first:
 
 (defvar *net-loop* nil
   "The CL-TRANSPORT.LOOP:EVENT-LOOP every session runs on.  START-NOSTR-GATEWAY makes one (and a
-thread to turn it) unless the host already did.")
+thread to turn it, or not: *NET-LOOP-THREAD*) unless the host already did.")
+
+(defparameter *net-loop-thread* #-modus t #+modus nil
+  "Whether ENSURE-NET-LOOP gives the loop a thread of its own.  Not on modus, whose threads share
+no state: a hosted modus thread's objects live in its own heap, and the loop's thread storing
+its sessions into the loop and the gateway's tables -- made by the thread that started the
+gateway -- is refused.  There the relays' thread turns the loop: every wait in cl-nostr is a call
+to its pump (CL-NOSTR.UTIL::*PUMP*, through WAIT-STEP), and the pump installed here alternates a
+pass over the relays with a turn of the loop.  On a board that is what it was before, one core
+taking turns, less a thread slot (which modus never frees).")
+
+(defun %turn-net-loop (lp seconds)
+  "One turn of LP waiting at most SECONDS -- unless this is already inside one of LP's callbacks
+(a callback that waits on the relays), where a turn would run callbacks inside a callback."
+  (if (eq cl-transport.loop:*event-loop* lp)
+      (when (plusp seconds) (sleep seconds))
+      (cl-transport.loop:run-once lp :max-wait seconds)))
+
+(defun %pump-and-turn (lp seconds)
+  "Service the relays and turn LP for SECONDS: a pass over the relays, then a turn that waits up
+to 5 ms if they had nothing.  The number of relay messages handled."
+  (let ((end (+ (get-internal-real-time) (round (* seconds internal-time-units-per-second))))
+        (n 0))
+    (loop
+      (let ((got (cl-nostr.relay:pump 0)))
+        (incf n got)
+        (%turn-net-loop lp (if (plusp got) 0 0.005))
+        (when (>= (get-internal-real-time) end) (return n))))))
 
 (defun ensure-net-loop ()
   (unless *net-loop*
     (setf *net-loop* (cl-transport.loop:make-event-loop))
     (let ((lp *net-loop*))
-      (bt:make-thread (lambda () (cl-transport.loop:run lp)) :name "net-loop")))
+      (if *net-loop-thread*
+          (bt:make-thread (lambda () (cl-transport.loop:run lp)) :name "net-loop")
+          (setf cl-nostr.util::*pump* (lambda (seconds) (%pump-and-turn lp seconds))))))
   *net-loop*)
 
 (defun %start-media (conn agent pub)
@@ -1405,7 +1434,9 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
   (let ((deadline (+ (get-universal-time) *ready-timeout*)))
     ;; A SHORT pump: the answer waits in the outbox until this returns, and a 5 s pump held a
     ;; ready answer for up to 5 s (13 s under load) on a board.
-    (loop (cl-nostr.relay:pump 0.25)
+    ;; WAIT-STEP is the relay pump on modus (the loop's turns too, without a loop thread) and a
+    ;; sleep where relays have reader threads.
+    (loop (cl-nostr.util:wait-step 0.25)
           (%outbox-drain)
           (when (> (get-universal-time) deadline) (%gateway-ready))))))
 
