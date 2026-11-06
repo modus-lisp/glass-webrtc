@@ -141,9 +141,12 @@
 (ok "  (the file itself stays: login-link.lisp mints from a shell and is unchanged)"
     (probe-file (merge-pathnames "login-token.lisp" *here*)))
 
-(ok "the one decision left is a CALL: ASK-ADMISSION, over glass:ADMISSION-ADMIT"
+(ok "the one decision left is a CALL: ASK-ADMISSION, over the desktop's ADMIT -- the socket's
+        GLASS::ADMISSION-REQUEST, or ADMISSION-SERVE itself when the desktop is in this image"
     (and (search "(defun ask-admission" *gateway*)
-         (search "(glass:admission-admit pubkey code" *gateway*)))
+         (search "(%admission-admit pubkey code" *gateway*)
+         (search "(apply #'glass::admission-request verb" *gateway*)
+         (search "(glass::admission-serve " *gateway*)))
 (ok "and it is the ONLY admission decision in the file — no second path, no fallback store"
     (= 1 (let ((n 0) (at 0))
            (loop for i = (search "(ask-admission " *gateway* :start2 at)
@@ -176,10 +179,10 @@
 ;;; to make the answer worse than it was.
 
 (ok "the gateway asks for it — and asks the DESKTOP, which is where the mint lives"
-    (search "(glass:admission-mint pubkey" *gateway*))
+    (search "(%admission-mint pubkey" *gateway*))
 (ok "ONCE, and only inside ASK-ADMISSION — a second mint site is a second policy"
     (let ((n 0) (at 0) (edge (search "(defun parse-offer" *gateway*)))
-      (loop for i = (search "(glass:admission-mint" *gateway* :start2 at)
+      (loop for i = (search "(%admission-mint" *gateway* :start2 at)
             while i do (incf n) (setf at (1+ i))
                        (ok "  …and it is above PARSE-OFFER, i.e. inside ASK-ADMISSION" (< i edge)))
       (= n 1)))
@@ -187,7 +190,7 @@
         denial keeps its reason"
     (search "(when (and (eq via :allowlist) (not (stringp token)))" *gateway*))
 (ok "GUARDED, so a new failure mode here is not a crashloop with a dead desktop behind it"
-    (let ((at (search "(glass:admission-mint pubkey" *gateway*)))
+    (let ((at (search "(%admission-mint pubkey" *gateway*)))
       (and at (search "(ignore-errors" *gateway* :start2 (max 0 (- at 200)) :end2 at))))
 (ok "…and it can only ADD: TOKEN is replaced only when a string came back, so a refusal or an
         unreachable desktop leaves the answer exactly as it is today"
