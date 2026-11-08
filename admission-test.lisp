@@ -195,7 +195,10 @@
 (ok "…and it can only ADD: TOKEN is replaced only when a string came back, so a refusal or an
         unreachable desktop leaves the answer exactly as it is today"
     (and (search "(when (stringp minted)" *gateway*)
-         (search "(values via (and (stringp token) token)" *gateway*)))
+         (search "(values via (if via (and (stringp token) token) token)" *gateway*)))
+(ok "…while a DENIAL hands its reason through (the DENIED line printed `nil' for every refusal)"
+    (and (search "(values via (if via (and (stringp token) token) token)" *gateway*)
+         (search "(format t \"~&@@ DENIED ~a... — ~(~a~)~%\" (subseq phone-pub 0 8) renewal)" *gateway*)))
 
 ;; The other half of "minimal": nothing downstream of it moved.  The envelope is built from the
 ;; same variable, in the same place, under the same condition it always was.

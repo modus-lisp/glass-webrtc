@@ -336,7 +336,10 @@ port, because a silent refusal here would be diagnosed for an hour in the wrong 
     ;; PARSED HERE AND NOWHERE ELSE, and NIL-safe both ways: an older desktop sends no `expires' and
     ;; a garbled one sends something that is not a number.  Both answer NIL, the envelope leaves the
     ;; field out, and the client falls back to the heuristic it had before this existed.
-    (values via (and (stringp token) token)
+    ;; A DENIAL KEEPS ITS REASON.  For a refusal TOKEN is the reason (:bad / :expired / :absent /
+    ;; :unreachable), which the caller prints on its DENIED line; filtering it like a renewal code
+    ;; turned every one of them into "DENIED … — nil".
+    (values via (if via (and (stringp token) token) token)
             (and plist (ignore-errors (parse-integer (getf plist :expires)))))))
 
 (defun parse-offer (payload)
