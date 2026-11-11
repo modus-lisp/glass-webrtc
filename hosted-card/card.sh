@@ -12,7 +12,11 @@
 # Optional:
 #   CARD_DIR     logs and stores (default ./card-run)
 #   DESK_IMPL    sbcl (default) or a modus binary for the desktop
+#   CARD_NSEC_FILE  the box's secret key, kept across runs (made 0600 on first use); unset, a
+#                fresh identity per run
 #   CARD_DESK    lean: glass's lean desk instead of the window manager
+#   CARD_ONE_PROCESS=1  ONE Lisp, IMPL: the gateway is the desktop too (the window manager; not
+#                with CARD_DESK=lean), so no separate desktop is started and DESK_IMPL is unused
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
 #   CARD_LOGIN_TTL, CARD_ONE_THREAD, CARD_TRACE, CARD_ADMDIAG, CARD_TS, CARD_SYMDUMP -- see
 #   card-gateway.lisp
@@ -25,19 +29,30 @@ CARD_DIR=${CARD_DIR:-$PWD/card-run}; mkdir -p "$CARD_DIR"
 ss -ltn | grep -q ":$DPORT\b" && { echo "desk port $DPORT busy"; exit 1; }
 ss -ltn | grep -q ":$((DPORT+1))\b" && { echo "admission port $((DPORT+1)) busy"; exit 1; }
 run () { if [ "$1" = sbcl ]; then echo "sbcl --dynamic-space-size 4096 --script"; else echo "$1 --script"; fi; }
-( export MODUS_ROOT MODUS_RFB_PORT=$DPORT CARD_DESK=${CARD_DESK:-}
-  [ -n "${CARD_SYMDUMP:-}" ] && export CARD_SYMDUMP=$CARD_SYMDUMP.desk
-  exec setsid $(run "${DESK_IMPL:-sbcl}") "$HERE/card-desk.lisp" ) > "$CARD_DIR/desk-$TAG.log" 2>&1 < /dev/null &
-DESK_PID=$!
-for i in $(seq 300); do grep -q 'serving on' "$CARD_DIR/desk-$TAG.log" 2>/dev/null && break; kill -0 $DESK_PID 2>/dev/null || break; sleep 1; done
-grep -q 'serving on' "$CARD_DIR/desk-$TAG.log" || { echo "desktop did not start (see $CARD_DIR/desk-$TAG.log)"; exit 1; }
+if [ "${CARD_ONE_PROCESS:-}" = 1 ]; then
+  [ "${CARD_DESK:-}" = lean ] && { echo "CARD_ONE_PROCESS runs the window manager, not CARD_DESK=lean"; exit 1; }
+  DESK_PID=
+else
+  ( export MODUS_ROOT MODUS_RFB_PORT=$DPORT CARD_DESK=${CARD_DESK:-}
+    [ -n "${CARD_SYMDUMP:-}" ] && export CARD_SYMDUMP=$CARD_SYMDUMP.desk
+    exec setsid $(run "${DESK_IMPL:-sbcl}") "$HERE/card-desk.lisp" ) > "$CARD_DIR/desk-$TAG.log" 2>&1 < /dev/null &
+  DESK_PID=$!
+  for i in $(seq 300); do grep -q 'serving on' "$CARD_DIR/desk-$TAG.log" 2>/dev/null && break; kill -0 $DESK_PID 2>/dev/null || break; sleep 1; done
+  grep -q 'serving on' "$CARD_DIR/desk-$TAG.log" || { echo "desktop did not start (see $CARD_DIR/desk-$TAG.log)"; exit 1; }
+fi
 STORE=$CARD_DIR/store-$TAG; rm -rf "$STORE"; mkdir -p "$STORE"; chmod 700 "$STORE"
 T0=$(date +%s)
 ( set +x; source "$CARD_CONFIG"
   read -r srv user pass <<< "$TURN_ICE"
   export TURN_ICE TURN_SERVER=${srv#turn:} TURN_SERVER_URL=$srv TURN_USER=$user TURN_PASS=$pass
   # a fresh box identity per run
-  export NOSTR_SEC=$(od -An -N32 -tx1 /dev/urandom | tr -d " \n") && export GLASS_NOSTR_SEC=$NOSTR_SEC
+  # CARD_NSEC_FILE keeps the box's identity across runs: created 0600 on first use, then reused.
+  if [ -n "${CARD_NSEC_FILE:-}" ]; then
+    [ -s "$CARD_NSEC_FILE" ] || ( umask 077; od -An -N32 -tx1 /dev/urandom | tr -d " \n" > "$CARD_NSEC_FILE" )
+    export NOSTR_SEC=$(cat "$CARD_NSEC_FILE")
+  else
+    export NOSTR_SEC=$(od -An -N32 -tx1 /dev/urandom | tr -d " \n")
+  fi && export GLASS_NOSTR_SEC=$NOSTR_SEC
   export GLASS_NOSTR_ALLOW=$OWNER GLASS_HOST=127.0.0.1 GLASS_PORT=$DPORT
   export GLASS_ADMISSION_HOST=127.0.0.1 GLASS_ADMISSION_PORT=$((DPORT+1)) CARD_STORE=$STORE MODUS_ROOT
   export NOSTR_RELAYS=${NOSTR_RELAYS:-wss://nos.lol,wss://relay.primal.net}
@@ -46,6 +61,7 @@ T0=$(date +%s)
   [ "$IMPL" = sbcl ] || ulimit -c unlimited
   exec setsid $(run "$IMPL") "$HERE/card-gateway.lisp" ) > "$CARD_DIR/gw-$TAG.log" 2>&1 < /dev/null &
 GW_PID=$!
+[ -n "$DESK_PID" ] || DESK_PID=$GW_PID     # one process: it is the desktop too
 echo "$GW_PID $DESK_PID" > "$CARD_DIR/$TAG.pids"
 for i in $(seq 450); do grep -aq "ready: answering" "$CARD_DIR/gw-$TAG.log" && break; kill -0 $GW_PID 2>/dev/null || break; sleep 2; done
 grep -aq "ready: answering" "$CARD_DIR/gw-$TAG.log" || { echo "gateway not ready after $(( $(date +%s)-T0 )) s (see $CARD_DIR/gw-$TAG.log)"; exit 1; }

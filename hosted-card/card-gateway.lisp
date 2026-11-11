@@ -14,6 +14,9 @@
 ;;;;   CARD_ADMDIAG=1      admission requests' shapes (never a code's value) and what they signalled
 ;;;;   CARD_TS=1           time loading the system trust store
 ;;;;   CARD_SYMDUMP=FILE   modus: every function's code address, for naming PCs in a core dump
+;;;; One process:
+;;;;   CARD_ONE_PROCESS=1  also the DESKTOP: glass's window manager on GLASS_PORT in this process,
+;;;;                       so the card is one Lisp, not two (card.sh then starts nothing else)
 (require :asdf)
 (defvar *root* (or (sb-ext:posix-getenv "MODUS_ROOT") "/opt/modus-lisp"))
 ;; third-party systems (cl-base64 ...) from Quicklisp's tree, BEHIND the pinned tree
@@ -24,6 +27,7 @@
 (let ((t0 (get-internal-real-time)))
   (asdf:load-system "glass/nostr")
   (asdf:load-system "glass-webrtc/nostr-lean")
+  (when (equal (sb-ext:posix-getenv "CARD_ONE_PROCESS") "1") (asdf:load-system "glass/wm"))
   (format t "~&card-gateway: loaded in ~,1f s~%" (/ (- (get-internal-real-time) t0) internal-time-units-per-second))
   (finish-output))
 ;; CARD_SYMDUMP=FILE (modus): every function's code address, for naming PCs in a core dump later
@@ -164,5 +168,25 @@
             (finish-output))))
   (call "GLASS" "START-SESSION-NOSTR" :port aport)
   (set-by-name "WEBRTC-DATA" "*ON-READY*" (lambda () (call "GLASS" "SEND-LOGIN-LINK" owner)))
+  ;; CARD_ONE_PROCESS: the desktop, here.  Its network and compositor threads start now; its Lisp
+  ;; listener (what REPL windows evaluate on) is this thread's on modus, where only the main thread
+  ;; evaluates -- served between relay reads, as CARD_ONE_THREAD serves the net loop, so a long
+  ;; evaluation holds up the gateway until it returns -- and a thread of its own on SBCL.  The
+  ;; gateway still reaches the desktop over loopback RFB: threads that share no state talk
+  ;; through a socket.
+  (when (equal (env "CARD_ONE_PROCESS") "1")
+    (let ((listener (call "GLASS.WM" "START-WM" rport :width 640 :height 480)))
+      (format t "~&card-gateway: desktop on 127.0.0.1:~d (one process)~%" rport) (finish-output)
+      #+modus
+      (let* ((pump-sym (find-symbol "PUMP" "CL-NOSTR.RELAY"))
+             (orig (symbol-function pump-sym))
+             (turn (symbol-function (find-symbol "LISTENER-TURN" "GLASS-REPL"))))
+        (setf (symbol-function pump-sym)
+              (lambda (&optional (timeout 0))
+                (funcall turn listener)
+                (funcall orig timeout))))
+      #-modus
+      (sb-thread:make-thread (lambda () (call "GLASS-REPL" "RUN-LISTENER" listener))
+                             :name "glass-wm-listener")))
   (format t "~&card-gateway: starting the gateway~%") (finish-output)
   (call "WEBRTC-DATA" "START-NOSTR-GATEWAY"))
