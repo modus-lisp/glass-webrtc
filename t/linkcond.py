@@ -275,7 +275,10 @@ def measure(p, grab):
         if t_in and t_seen:
             lat.append(t_seen - t_in)
         if os.environ.get("LINKCOND_DEBUG"):
-            print(f"     step {i}: probe ({probe},{y}) seen {t_seen and t_seen - (t_in or 0)}", flush=True)
+            rxs = p.evaluate("([a, b]) => window.__rx.filter(r => r[0] >= a && r[0] <= b)"
+                             ".map(r => [Math.round(r[0] - a), r[1], r[2]])",
+                             [t_in, (t_seen or t_in + 3000) + 5]) if t_in else []
+            print(f"     step {i}: seen {t_seen and round(t_seen - (t_in or 0))}  rx {rxs}", flush=True)
         quiet()
     k0 = rx(); t0 = p.evaluate("performance.now()"); f0 = p.evaluate(VFRAMES)
     end = time.time() + 5; step = 0
