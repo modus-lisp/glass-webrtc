@@ -96,6 +96,8 @@ def relay_conn(conn):
     try:
         for raw in conn:
             msg = json.loads(raw)
+            if os.environ.get("LINKCOND_DEBUG"):
+                print(f"     relay <- {raw[:160]}", flush=True)
             if msg[0] == "REQ":
                 sid, filts = msg[1], msg[2:]
                 with RLOCK:
@@ -116,8 +118,9 @@ def relay_conn(conn):
             elif msg[0] == "CLOSE":
                 with RLOCK:
                     LIVE[:] = [x for x in LIVE if not (x[0] is conn and x[1] == msg[1])]
-    except Exception:
-        pass
+    except Exception as e:
+        if os.environ.get("LINKCOND_DEBUG"):
+            print(f"     relay connection ended: {e!r}", flush=True)
     finally:
         with RLOCK:
             LIVE[:] = [x for x in LIVE if x[0] is not conn]
@@ -221,14 +224,23 @@ def title_bar(png):
 # a 12 px step.  The step right moves an edge into it, the step back moves it out -- whether the
 # window manager moves the window or, once it measures lag, a wireframe outline of it.  Polled
 # every animation frame, so the latency is input event to the change on the client's canvas.
+# What the user is LOOKING AT: the desktop as video (a VIDEO_PRIMARY card) when a <video> is showing
+# frames, else noVNC's canvas.  Video is copied to a scratch canvas to be read.
 PIXEL = """async ([X, Y, since, limit]) => {
-  const c = [...document.querySelectorAll('canvas')].sort((a, b) =>
-              b.width * b.height - a.width * a.height)[0];
-  const r = c.getBoundingClientRect(), g = c.getContext('2d', { willReadFrequently: true });
-  const sx = c.width / r.width;
-  const at = () => g.getImageData(Math.floor((X - 6 - r.left) * sx),
-                                  Math.floor((Y - r.top) * c.height / r.height),
-                                  Math.max(1, Math.round(13 * sx)), 1).data.join(',');
+  const v = [...document.querySelectorAll('video')].find(v => v.videoWidth > 64 &&
+              v.getBoundingClientRect().width > 200 && getComputedStyle(v).visibility !== 'hidden' &&
+              getComputedStyle(v).display !== 'none' && +getComputedStyle(v).opacity > 0.5);
+  let c, g, w, h;
+  if (v) { w = v.videoWidth; h = v.videoHeight;
+           c = window.__vc || (window.__vc = document.createElement('canvas'));
+           c.width = w; c.height = h; g = c.getContext('2d', { willReadFrequently: true }); }
+  else { c = [...document.querySelectorAll('canvas')].sort((a, b) =>
+               b.width * b.height - a.width * a.height)[0];
+         w = c.width; h = c.height; g = c.getContext('2d', { willReadFrequently: true }); }
+  const r = (v || c).getBoundingClientRect(), sx = w / r.width;
+  const at = () => { if (v) g.drawImage(v, 0, 0);
+                     return g.getImageData(Math.floor((X - 6 - r.left) * sx), Math.floor((Y - r.top) * h / r.height),
+                                           Math.max(1, Math.round(13 * sx)), 1).data.join(','); };
   if (since === null) return at();
   const t0 = performance.now();
   return await new Promise(res => { const step = () => {
@@ -236,6 +248,10 @@ PIXEL = """async ([X, Y, since, limit]) => {
     else if (performance.now() - t0 > limit) res(null);
     else requestAnimationFrame(step); }; step(); });
 }"""
+
+# Decoded frames of the largest showing <video>, or null: how a VIDEO_PRIMARY card's updates arrive.
+VFRAMES = """() => { const v = [...document.querySelectorAll('video')].find(v => v.videoWidth > 64);
+  return v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : null; }"""
 
 def measure(p, grab):
     x, y, left = grab
@@ -261,7 +277,7 @@ def measure(p, grab):
         if os.environ.get("LINKCOND_DEBUG"):
             print(f"     step {i}: probe ({probe},{y}) seen {t_seen and t_seen - (t_in or 0)}", flush=True)
         quiet()
-    k0 = rx(); t0 = p.evaluate("performance.now()")
+    k0 = rx(); t0 = p.evaluate("performance.now()"); f0 = p.evaluate(VFRAMES)
     end = time.time() + 5; step = 0
     while time.time() < end:            # out 150 px and back, over and over: ends where it began
         step += 1
@@ -272,6 +288,7 @@ def measure(p, grab):
     time.sleep(0.6)
     t1 = p.evaluate("performance.now()")
     msgs = p.evaluate(f"window.__rx.slice({k0})")
+    f1 = p.evaluate(VFRAMES)
     p.mouse.up()
     ups, last = 0, -1e9
     for t, n, lab in msgs:
@@ -279,7 +296,9 @@ def measure(p, grab):
             if t - last > 6: ups += 1
             last = t
     secs = (t1 - t0) / 1000
-    return dict(lat_n=len(lat),
+    video = f0 is not None and f1 is not None and f1 > f0 and ups < (f1 - f0)
+    if video: ups = f1 - f0          # the desktop arrived as video frames, not on the data channel
+    return dict(video=video,lat_n=len(lat),
                 lat_med=statistics.median(lat) if lat else None,
                 lat_p90=sorted(lat)[max(0, int(len(lat) * 0.9) - 1)] if lat else None,
                 ups=ups / secs, kbs=sum(m[1] for m in msgs) / secs / 1024)
@@ -306,8 +325,10 @@ def start_card(owner_pub):
                MODUS_ROOT=os.environ.get("MODUS_ROOT", str(SRC.parent)),
                QUICKLISP_SOFTWARE=os.environ.get("QUICKLISP_SOFTWARE", ql))
     t0 = time.time()
-    r = subprocess.run([str(SRC / "hosted-card" / "card.sh"), "lc", IMPL, str(DESK_PORT)], env=env,
-                       cwd=str(card_dir), capture_output=True, text=True, timeout=900)
+    card = os.environ.get("LINKCOND_CARD") or str(SRC / "hosted-card" / "card.sh")   # another launcher, same contract
+    r = subprocess.run([card, "lc", IMPL, str(DESK_PORT)], env=env,
+                       cwd=str(card_dir), capture_output=True, text=True,
+                       timeout=int(os.environ.get("LINKCOND_CARD_TIMEOUT", "900")))   # a cold compile is longer
     pids = card_dir / "lc.pids"
     if pids.exists():
         card_pids.extend(int(x) for x in set(pids.read_text().split()))
@@ -355,10 +376,15 @@ try:
                 if running:
                     p.screenshot(path=str(OUT / f"{name}.png"))
                     grab, colours = title_bar(OUT / f"{name}.png")
-                    if grab:
+                    # A title bar on a screen of a few hundred colours is grey RFB tiles, not a
+                    # desktop: a painted one (wallpaper, text, chrome) is in the thousands.
+                    if grab and colours >= 1000:
                         painted = True; break
                 time.sleep(0.5)
             r["ttd"] = time.time() - t0 if painted else None
+            if not painted:      # the client's own account of how far it got
+                (OUT / f"{name}-diag.txt").write_text(d)
+                p.screenshot(path=str(OUT / f"{name}-failed.png"))
             r["colours"] = colours
             ok(f"{name}: the client runs", running)
             ok(f"{name}: the desktop is painted (a window's title bar is on the screen)", painted,
@@ -385,6 +411,7 @@ print(f"\n{'scenario':<8} {'desktop':>8} {'median':>8} {'p90':>8} {'upd/s':>7} {
 for name, r in results.items():
     f = lambda v, fmt: (fmt % v) if v is not None else "-"
     print(f"{name:<8} {f(r.get('ttd'), '%6.1f s'):>8} {f(r.get('lat_med'), '%5.0f ms'):>8} "
-          f"{f(r.get('lat_p90'), '%5.0f ms'):>8} {f(r.get('ups'), '%5.1f'):>7} {f(r.get('kbs'), '%4.0f'):>6}")
+          f"{f(r.get('lat_p90'), '%5.0f ms'):>8} {f(r.get('ups'), '%5.1f'):>7} {f(r.get('kbs'), '%4.0f'):>6}"
+          f"{'  video' if r.get('video') else ''}")
 print(f"\nLINKCOND {IMPL}: {'PASS' if not fails else 'FAIL (' + str(len(fails)) + ')'}", flush=True)
 sys.exit(1 if fails else 0)
