@@ -138,7 +138,8 @@ RFB and video keep interleaving normally.")
 ;;; that reconnects gets the new hash, sees it differs from its cache, and fetches.
 
 (defvar *payload-cache* nil
-  "(path enc bytes sha mtime size) for the most recently read payload, or NIL.")
+  "A list of (path enc bytes sha mtime size), one per encoding served: a raw and a gzip client
+alternating must not evict each other, when one of the two entries is a compression.")
 (defvar *payload-lock* (bt:make-lock "payload-file"))
 
 (defun %sha256-hex (bytes)
@@ -157,29 +158,42 @@ RFB and video keep interleaving normally.")
 (defun payload-bytes (gzip-ok)
   "The payload to serve, as (values BYTES SHA ENC), or NIL if there is nothing to serve.
 
-Prefers payload.js.gz when the browser said it can inflate.  Cached on (path mtime size) so the
-steady state is one FILE-WRITE-DATE per phone rather than a re-read and a re-hash — and so replacing
-the file is picked up on the next connection with no restart."
+Prefers payload.js.gz when the browser said it can inflate -- and with no .gz beside it, GZIPS THE
+RAW FILE ITSELF.  A deployed card has only payload.js (816706 B raw in a phone's log, for 8x less
+on the wire gzipped), and a cold start over a phone's relay is spent mostly on that transfer.
+Compressed once per file version, deterministically (CRAM:GZIP-COMPRESS stamps no time), so the
+SHA a phone caches against is stable across restarts.  Cached on (path enc mtime) so the steady
+state is one FILE-WRITE-DATE per phone rather than a re-read and a re-hash -- and so replacing the
+file is picked up on the next connection with no restart."
   (let* ((base *payload-file*)
-         (path (or (and gzip-ok
-                        (let ((gz (concatenate 'string base ".gz")))
-                          (and (probe-file gz) gz)))
-                   (and (probe-file base) base))))
+         (gz-file (and gzip-ok
+                       (let ((gz (concatenate 'string base ".gz")))
+                         (and (probe-file gz) gz))))
+         (path (or gz-file (and (probe-file base) base))))
     (when path
-      (let ((enc (if (and gzip-ok (> (length path) 3)
-                          (string= ".gz" (subseq path (- (length path) 3))))
-                     "gzip" "raw"))
+      ;; CRAM BY NAME: this file is also LOADed by path into a gateway that may not have it.  Then
+      ;; a browser that can inflate is simply sent the raw file, as before.
+      (let* ((gzip-here (and gzip-ok (not gz-file) (find-symbol "GZIP-COMPRESS" "CRAM")))
+             (enc (if (or gz-file gzip-here) "gzip" "raw"))
             (mtime (ignore-errors (file-write-date path))))
         (bt:with-lock-held (*payload-lock*)
-          (let ((c *payload-cache*))
-            (if (and c (equal (first c) path) (eql (fifth c) mtime))
+          (let ((c (find-if (lambda (e) (and (equal (first e) path) (equal (second e) enc)))
+                            *payload-cache*)))
+            (if (and c (eql (fifth c) mtime))
                 (values (third c) (fourth c) (second c))
                 (let ((bytes (%read-file-bytes path)))
                   (when (and bytes (plusp (length bytes)))
-                    (let ((sha (%sha256-hex bytes)))
-                      (setf *payload-cache* (list path enc bytes sha mtime (length bytes)))
-                      (format *error-output* "~&[payload] ~a — ~a B ~a sha ~a~%"
-                              path (length bytes) enc (subseq sha 0 16))
+                    (let* ((raw-len (length bytes))
+                           (bytes (if gzip-here (funcall gzip-here bytes) bytes))
+                           (sha (%sha256-hex bytes)))
+                      (setf *payload-cache*
+                            (cons (list path enc bytes sha mtime (length bytes))
+                                  (remove-if (lambda (e) (and (equal (first e) path)
+                                                              (equal (second e) enc)))
+                                             *payload-cache*)))
+                      (format *error-output* "~&[payload] ~a — ~a B ~a~@[ (gzipped here from ~a B)~] sha ~a~%"
+                              path (length bytes) enc (and gzip-here raw-len)
+                              (subseq sha 0 16))
                       (finish-output *error-output*)
                       (values bytes sha enc)))))))))))
 

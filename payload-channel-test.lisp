@@ -27,7 +27,8 @@
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 (handler-bind ((warning #'muffle-warning))
   (let ((*standard-output* (make-broadcast-stream)))
-    (asdf:load-system "webrtc-data")))
+    (asdf:load-system "webrtc-data")
+    (asdf:load-system "cram")))                ; the gateway gzips a payload that has no .gz
 
 (in-package #:webrtc-data)
 
@@ -201,6 +202,20 @@
 (ok "a browser that cannot inflate gets the raw file"
     (search "\"enc\":\"raw\"" (cdr (first (strings-on-wire)))))
 (ignore-errors (delete-file *fixture-gz*))
+
+;; NO .gz BESIDE IT -- a deployed card's case -- and the gateway gzips the file itself.
+(setf *payload-cache* nil)
+(wire-clear)
+(payload-on-message nil :fake +payload-stream-id+ (hello-with "" "[\"gzip\",\"raw\"]") "pub")
+(settle)
+(defparameter *gz-sent* (apply #'concatenate '(vector (unsigned-byte 8))
+                               (mapcar (lambda (c) (as-u8vec (cdr c))) (chunks-on-wire))))
+(ok "with gzip offered and no .gz on disk, the gateway gzips it"
+    (search "\"enc\":\"gzip\"" (cdr (first (strings-on-wire)))))
+(ok "...into a gzip member that inflates to the file, and is smaller"
+    (and (plusp (length *gz-sent*)) (< (length *gz-sent*) (length *fixture-text*))
+         (equalp (cram:gzip-decompress *gz-sent*)
+                 (map '(vector (unsigned-byte 8)) #'char-code *fixture-text*))))
 
 ;;; ===========================================================================================
 (format t "~&== a payload change is picked up without a restart ==~%")
