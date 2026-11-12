@@ -75,7 +75,7 @@
         (loop with start = 0 for i = (position #\, env :start start)
               collect (string-trim " " (subseq env start (or i (length env))))
               while i do (setf start (1+ i)))
-        '("wss://relay.damus.io" "wss://nos.lol" "wss://relay.primal.net"))))
+        '("wss://relay.snort.social" "wss://nostr.oxtr.dev" "wss://relay.primal.net"))))
 
 (defun host-of (url)
   (let* ((p (search "://" url))

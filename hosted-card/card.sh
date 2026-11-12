@@ -6,7 +6,7 @@
 # environment from their files and are never printed.
 #
 # Required:
-#   OWNER        npub the box admits and DMs (its allowlist)
+#   OWNER        npub the box admits and DMs (its allowlist) -- here or in TAG.env, below
 #   MODUS_ROOT   source tree, one directory per system (glass, glass-webrtc, cl-nostr ...)
 #   CARD_CONFIG  a shell file setting TURN_ICE="turn:HOST:PORT USER PASS" (keep it mode 600)
 # Optional:
@@ -20,12 +20,20 @@
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
 #   CARD_LOGIN_TTL, CARD_ONE_THREAD, CARD_TRACE, CARD_ADMDIAG, CARD_TS, CARD_SYMDUMP -- see
 #   card-gateway.lisp
+# $CARD_DIR/TAG.env, if it exists, is the card's own settings: KEY=VALUE lines, OWNER and
+# NOSTR_RELAYS beside it (who the box admits, and where it listens for them), anything else from
+# the lists above.  The environment wins over the file.  Not for secrets: those have their files.
 # Stop: kill the two PIDs it prints (also in $CARD_DIR/TAG.pids).
 set -u
 TAG=${1:?usage: card.sh TAG IMPL DESKPORT}; IMPL=${2:?IMPL}; DPORT=${3:?DESKPORT}
 HERE=$(cd "$(dirname "$0")" && pwd)
-: "${OWNER:?set OWNER to the npub to admit}" "${MODUS_ROOT:?set MODUS_ROOT}" "${CARD_CONFIG:?set CARD_CONFIG}"
 CARD_DIR=${CARD_DIR:-$PWD/card-run}; mkdir -p "$CARD_DIR"
+if [ -f "$CARD_DIR/$TAG.env" ]; then
+  while IFS= read -r line; do
+    case "$line" in [A-Z_]*=*) k=${line%%=*}; [ -z "${!k:-}" ] && export "$k=${line#*=}";; esac
+  done < "$CARD_DIR/$TAG.env"
+fi
+: "${OWNER:?set OWNER to the npub to admit (or in \$CARD_DIR/$TAG.env)}" "${MODUS_ROOT:?set MODUS_ROOT}" "${CARD_CONFIG:?set CARD_CONFIG}"
 ss -ltn | grep -q ":$DPORT\b" && { echo "desk port $DPORT busy"; exit 1; }
 ss -ltn | grep -q ":$((DPORT+1))\b" && { echo "admission port $((DPORT+1)) busy"; exit 1; }
 run () { if [ "$1" = sbcl ]; then echo "sbcl --dynamic-space-size 4096 --script"; else echo "$1 --script"; fi; }
@@ -55,7 +63,7 @@ T0=$(date +%s)
   fi && export GLASS_NOSTR_SEC=$NOSTR_SEC
   export GLASS_NOSTR_ALLOW=$OWNER GLASS_HOST=127.0.0.1 GLASS_PORT=$DPORT
   export GLASS_ADMISSION_HOST=127.0.0.1 GLASS_ADMISSION_PORT=$((DPORT+1)) CARD_STORE=$STORE MODUS_ROOT
-  export NOSTR_RELAYS=${NOSTR_RELAYS:-wss://nos.lol,wss://relay.primal.net}
+  export NOSTR_RELAYS=${NOSTR_RELAYS:-wss://relay.snort.social,wss://nostr.oxtr.dev,wss://relay.primal.net}
   export PAYLOAD_CHANNEL=1 PAYLOAD_FILE=${PAYLOAD_FILE:-$HERE/../payload.js}
   export GLASS_LOGIN_URL_BASE=${LOGIN_URL_BASE:-https://npub1ajvjnhgcmdxkng22lzsh22qvl63es78gk6p9mwksepju974teguq4l4evc.nsite.lol/}
   [ "$IMPL" = sbcl ] || ulimit -c unlimited

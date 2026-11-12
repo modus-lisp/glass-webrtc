@@ -686,7 +686,7 @@ let code = (codeAlive(urlCode) ? urlCode : '') || loadCode() || urlCode;
 window.__expiredCode = Boolean(code) && !codeAlive(code);
 const boxPub = boxArg.startsWith('npub') ? decode(boxArg).data : boxArg;
 const relays = (params.get('relays') ||
-  'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net').split(',');
+  'wss://relay.snort.social,wss://nostr.oxtr.dev,wss://relay.primal.net').split(',');
 const nowSec = () => Math.floor(Date.now() / 1000);
 const pastTs = () => nowSec() - Math.floor(Math.random() * 172800);
 

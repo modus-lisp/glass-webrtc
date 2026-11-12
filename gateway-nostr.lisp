@@ -79,7 +79,7 @@ is a convention that drifts."
 (defparameter *relays*
   (let ((e (uiop:getenv "NOSTR_RELAYS")))
     (if e (remove "" (uiop:split-string e :separator ",") :test #'string=)
-        '("wss://relay.damus.io" "wss://nos.lol" "wss://relay.primal.net"))))
+        '("wss://relay.snort.social" "wss://nostr.oxtr.dev" "wss://relay.primal.net"))))
 ;; The box's identity.  REQUIRED — there is deliberately no fallback.
 ;;
 ;; There used to be one: "a fixed secret so the box's npub is stable (bake it into the page),
@@ -1258,10 +1258,10 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
   (format t "@@ box npub:   ~a~%" (or box-npub "(npub encode failed; use hex)"))
   (format t "@@ box pubkey: ~a~%" box-pub)
   (when box-npub
-    (format t "@@ share URL:  https://~a.nsite.lol/#~a~%"
+    (format t "@@ share URL:  https://~a.nsite.lol/?relays=~{~a~^,~}#~a~%"
             (or (uiop:getenv "NSITE_NPUB")
                 "npub1ajvjnhgcmdxkng22lzsh22qvl63es78gk6p9mwksepju974teguq4l4evc")
-            box-npub))
+            *relays* box-npub))
   ;; ASK THE DESKTOP WHO IT IS, ONCE, AT STARTUP.  Not because anything here needs the answer —
   ;; every admission asks again — but because this is where "nobody can connect" is diagnosed, and
   ;; a gateway that refuses every offer for an hour without ever having said the service was down

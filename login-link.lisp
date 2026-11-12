@@ -59,7 +59,7 @@
 (defparameter *relays*
   (let ((e (uiop:getenv "NOSTR_RELAYS")))
     (if e (remove "" (uiop:split-string e :separator ",") :test #'string=)
-        '("wss://relay.damus.io" "wss://nos.lol" "wss://relay.primal.net"))))
+        '("wss://relay.snort.social" "wss://nostr.oxtr.dev" "wss://relay.primal.net"))))
 
 ;; THE RELAY THE LINK CARRIES, as one line: "turn:host:port user pass".  Empty means the link
 ;; names no relay and the browser gathers host and server-reflexive candidates only -- the LAN
@@ -182,7 +182,12 @@ for exactly one of them."
              ;; nsite gateway's cache catches up); default is the nsite site URL.
              (base (or (uiop:getenv "LOGIN_URL_BASE")
                        (format nil "https://~a.nsite.lol/" *site*)))
-             (url (format nil "~a#~a" base (link-fragment box-npub token)))
+             ;; the relays the box listens on ride in the query, where the client reads them
+             ;; (glass's LOGIN-LINK-URL does the same): its built-in list may not be the box's
+             (url (format nil "~a~@[~a~]#~a" base
+                          (unless (or (search "relays=" base) (null *relays*))
+                            (format nil "~:[?~;&~]relays=~{~a~^,~}" (find #\? base) *relays*))
+                          (link-fragment box-npub token)))
              ;; WHICH DESKTOP.  A link on its own says "a glass desktop"; with several running,
              ;; the one thing the reader needs is which -- and it must be the name ON THE SCREEN,
              ;; not a name computed from the key.  See %DESKTOP-NAME.

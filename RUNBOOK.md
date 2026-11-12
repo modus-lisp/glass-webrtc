@@ -47,7 +47,10 @@ NIP-04 anywhere. The gateway subscribes to `kinds:(1059) #p:(box-pubkey)` and un
 `cl-nostr.nip59:unwrap-giftwrap`, which yields the **verified seal signer** — a forged rumour pubkey
 is rejected before the gateway sees it.
 
-Relays default to `relay.damus.io`, `nos.lol`, `relay.primal.net` (`NOSTR_RELAYS` overrides). Fan-out
+Relays default to `relay.snort.social`, `nostr.oxtr.dev`, `relay.primal.net` (`NOSTR_RELAYS` overrides),
+chosen by `t/relays.py`: nos.lol never acknowledges a gift wrap and damus answers 503, so the old
+damus/nos.lol/primal list left every sign-in to primal alone, at 4-10 s. The box's login links carry
+its relays (`?relays=`), so the client signals where the box listens. Fan-out
 means one offer arrives three or more times; duplicates are dropped by wrap event id.
 
 ### 2.1 Commands — answered by the desktop, not by the gateway
