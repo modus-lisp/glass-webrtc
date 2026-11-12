@@ -7,6 +7,7 @@
 #   MODUS_ROOT / QUICKLISP_SOFTWARE   where the card's systems come from (see t/linkcond.py)
 #   LINKCOND_BUILD=DIR                use an already-built client instead of building one
 #   LINKCOND_ONLY=lan,rtt100,...      a subset of the link conditions
+#   LINKCOND_RELAYS=wss://a,wss://b   signal over these public relays (sign-in time: `answer')
 # Needs what t/signin.sh needs (nsite-build's node_modules, shuttle, playwright's Chromium), plus
 # python3's aioice (the TURN messages) and PIL (the screenshots).  Writes only under /tmp.
 set -e

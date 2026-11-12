@@ -23,6 +23,12 @@ parent) and QUICKLISP_SOFTWARE (default: ~/quicklisp/dists/quicklisp/software) a
 LINKCOND_ONLY=name,name runs a subset (a stem names its repeats: slow); LINKCOND_OUT (default
 /tmp/glass-linkcond-out) gets the screenshots, the card's logs and results.json; LINKCOND_DEBUG=1
 prints every drag step.
+
+LINKCOND_RELAYS=wss://a,wss://b signals over those PUBLIC relays instead of the local one -- the
+one thing here that leaves the machine, and only when asked.  The `answer' column is then the
+sign-in's real cost: the offer's gift wrap going out to the box's answer being applied, which is
+two relay hops and the card's unwrap.  Measured 2026-11: nos.lol never acknowledged a gift wrap and
+relay.primal.net took 4-10 s, so a sign-in on those took up to 18 s; t/relays.py picks better ones.
 """
 import json, os, pathlib, signal, socket, statistics, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -76,6 +82,8 @@ def freeport_pair():
 
 BOX_SEC   = "11" * 32          # the card's Nostr identity
 OWNER_SEC = "33" * 32          # its owner: allowlisted, signs in with a NIP-07 signer in the page
+if os.environ.get("LINKCOND_RELAYS"):   # keys printed in this file do not go on a public relay
+    BOX_SEC, OWNER_SEC = os.urandom(32).hex(), os.urandom(32).hex()
 
 # ---- the relay: store and forward ----------------------------------------------------------------
 EVENTS, LIVE, RLOCK = [], [], threading.Lock()
@@ -155,6 +163,7 @@ class H(BaseHTTPRequestHandler):
 
 HTTP_PORT, WS_PORT, TURN_PORT, DESK_PORT = freeport(), freeport(), freeport(), freeport_pair()
 BASE, RELAY = f"http://127.0.0.1:{HTTP_PORT}", f"ws://127.0.0.1:{WS_PORT}"
+RELAY = os.environ.get("LINKCOND_RELAYS") or RELAY       # the public ones, when asked
 TURN_USER, TURN_PASS = "linkcond", "linkcond-pass"
 httpd = ThreadingHTTPServer(("127.0.0.1", HTTP_PORT), H)
 threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -172,11 +181,28 @@ turn = subprocess.Popen([sys.executable, str(HERE / "turn.py"), str(TURN_PORT), 
 # ---- the page-side instruments --------------------------------------------------------------------
 # Every inbound data-channel message, timestamped; every pointer input, timestamped.
 TAP = """(() => {
-  window.__rx = []; window.__inputs = [];
+  window.__rx = []; window.__inputs = []; window.__sig = {};
+  // SIGNALLING: the offer's gift wrap leaving (first kind-1059 EVENT on any relay socket) and the
+  // answer being applied -- their difference is what the relays cost a sign-in.
+  const W = window.WebSocket;
+  window.WebSocket = function (...a) { const s = new W(...a); const send = s.send.bind(s);
+    const host = String(a[0]).replace(/^wss?:\/\//, '').split('/')[0];
+    s.addEventListener('message', (e) => { if (typeof e.data !== 'string') return;
+      if (e.data.startsWith('["EOSE"')) (window.__sig.log ||= []).push([performance.now(), host, 'EOSE']);
+      else if (e.data.startsWith('["EVENT"') && e.data.includes('"kind":1059'))
+        (window.__sig.log ||= []).push([performance.now(), host, 'gift wrap in']); });
+    s.send = (d) => { if (window.__sig.out == null && typeof d === 'string' && d.startsWith('["EVENT"')
+                          && d.includes('"kind":1059')) window.__sig.out = performance.now();
+                      return send(d); };
+    return s; };
+  window.WebSocket.prototype = W.prototype; Object.assign(window.WebSocket, W);
   const tap = (ch) => ch.addEventListener('message', (e) => {
     const n = e.data.byteLength ?? e.data.size ?? e.data.length ?? 0;
     window.__rx.push([performance.now(), n, ch.label]); });
-  const P = RTCPeerConnection.prototype, cdc = P.createDataChannel;
+  const P = RTCPeerConnection.prototype, cdc = P.createDataChannel, srd = P.setRemoteDescription;
+  P.setRemoteDescription = function (d, ...r) {
+    if (d && d.type === 'answer' && window.__sig.answer == null) window.__sig.answer = performance.now();
+    return srd.call(this, d, ...r); };
   P.createDataChannel = function (...a) { const ch = cdc.apply(this, a); tap(ch); return ch; };
   const ael = P.addEventListener;
   P.addEventListener = function (t, f, ...r) {
@@ -385,6 +411,14 @@ try:
                         painted = True; break
                 time.sleep(0.5)
             r["ttd"] = time.time() - t0 if painted else None
+            sig = p.evaluate("() => window.__sig")
+            if os.environ.get("LINKCOND_DEBUG") and sig.get("out") is not None:
+                for ms, h, what in sig.get("log", []):
+                    print(f"     relay {(ms - sig['out']) / 1000:+6.2f} s  {h:24} {what}", flush=True)
+                if sig.get("answer") is not None:
+                    print(f"     relay {(sig['answer'] - sig['out']) / 1000:+6.2f} s  answer applied", flush=True)
+            r["answer"] = ((sig["answer"] - sig["out"]) / 1000
+                           if sig.get("answer") is not None and sig.get("out") is not None else None)
             if not painted:      # the client's own account of how far it got
                 (OUT / f"{name}-diag.txt").write_text(d)
                 p.screenshot(path=str(OUT / f"{name}-failed.png"))
@@ -410,10 +444,10 @@ finally:
     turn.terminate()
     (OUT / "results.json").write_text(json.dumps(dict(impl=IMPL, results=results), indent=1))
 
-print(f"\n{'scenario':<8} {'desktop':>8} {'median':>8} {'p90':>8} {'upd/s':>7} {'KB/s':>6}")
+print(f"\n{'scenario':<8} {'desktop':>8} {'answer':>8} {'median':>8} {'p90':>8} {'upd/s':>7} {'KB/s':>6}")
 for name, r in results.items():
     f = lambda v, fmt: (fmt % v) if v is not None else "-"
-    print(f"{name:<8} {f(r.get('ttd'), '%6.1f s'):>8} {f(r.get('lat_med'), '%5.0f ms'):>8} "
+    print(f"{name:<8} {f(r.get('ttd'), '%6.1f s'):>8} {f(r.get('answer'), '%6.1f s'):>8} {f(r.get('lat_med'), '%5.0f ms'):>8} "
           f"{f(r.get('lat_p90'), '%5.0f ms'):>8} {f(r.get('ups'), '%5.1f'):>7} {f(r.get('kbs'), '%4.0f'):>6}"
           f"{'  video' if r.get('video') else ''}")
 print(f"\nLINKCOND {IMPL}: {'PASS' if not fails else 'FAIL (' + str(len(fails)) + ')'}", flush=True)
