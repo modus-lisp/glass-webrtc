@@ -966,8 +966,9 @@ TURN allocation is released (not leaked for ~600s)."
                            (dt (max 1d-3 (/ (float (- tn tp) 1d0) internal-time-units-per-second))))
                       (flet ((d (k) (- (or (getf now k) 0) (or (getf prev k) 0))))
                         (format *error-output*
-                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a cwnd ~a flight ~a outq ~a srtt ~a~%"
+                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a (fast ~a rack ~a tlp ~a rto ~a) cwnd ~a flight ~a outq ~a srtt ~a~%"
                                 (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt) (d :rtx)
+                                (d :fast-rtx) (d :rack) (d :tlp) (d :rto-events)
                                 (getf now :cwnd) (getf now :flight) (getf now :send-q)
                                 (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))))
                       (setf prev now tp tn)))

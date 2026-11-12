@@ -176,7 +176,8 @@ def shape(link):
     time.sleep(0.5)                                  # t/turn.py re-reads it within 0.2 s
 shape(None)
 turn = subprocess.Popen([sys.executable, str(HERE / "turn.py"), str(TURN_PORT), TURN_USER, TURN_PASS,
-                         str(SHAPE)], stdout=open(OUT / "turn.log", "w"), stderr=subprocess.STDOUT)
+                         str(SHAPE)], stdout=open(OUT / "turn.log", "w"), stderr=subprocess.STDOUT,
+                        env=dict(os.environ, TURN_DROPLOG=str(OUT / "drops.log")))
 
 # ---- the page-side instruments --------------------------------------------------------------------
 # Every inbound data-channel message, timestamped; every pointer input, timestamped.
@@ -304,7 +305,8 @@ def measure(p, grab):
             rxs = p.evaluate("([a, b]) => window.__rx.filter(r => r[0] >= a && r[0] <= b)"
                              ".map(r => [Math.round(r[0] - a), r[1], r[2]])",
                              [t_in, (t_seen or t_in + 3000) + 5]) if t_in else []
-            print(f"     step {i}: seen {t_seen and round(t_seen - (t_in or 0))}  rx {rxs}", flush=True)
+            wall = (p.evaluate("performance.timeOrigin") + t_in) / 1000 if t_in else 0
+            print(f"     step {i}: at {wall:.3f} seen {t_seen and round(t_seen - (t_in or 0))}  rx {rxs}", flush=True)
         quiet()
     k0 = rx(); t0 = p.evaluate("performance.now()"); f0 = p.evaluate(VFRAMES)
     end = time.time() + 5; step = 0

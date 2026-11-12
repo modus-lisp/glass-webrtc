@@ -41,6 +41,9 @@ def watch_shape():
 load_shape()
 threading.Thread(target=watch_shape, daemon=True).start()
 STATS = {"relayed": 0, "dropped": 0, "bytes": 0, "allocs": 0}
+# TURN_DROPLOG=FILE: one line per dropped datagram, `WALLTIME WAY BYTES' (up = browser -> card),
+# so a slow step can be lined up with what was lost and in which direction
+DROPLOG = open(os.environ["TURN_DROPLOG"], "a", buffering=1) if os.environ.get("TURN_DROPLOG") else None
 
 class Shaper:
     """Delay, jitter, loss, and a per-direction serialisation rate, then sendto."""
@@ -50,7 +53,9 @@ class Shaper:
         threading.Thread(target=self.run, daemon=True).start()
     def push(self, sock, data, addr, way):
         if random.random() < LOSS:
-            STATS["dropped"] += 1; return
+            STATS["dropped"] += 1
+            if DROPLOG: DROPLOG.write(f"{time.time():.4f} {way} {len(data)}\n")
+            return
         now = time.time(); t = now
         if KBPS > 0:      # a link that drains KBPS: queueing delay grows with the backlog
             start = max(now, self.free_at[way])
