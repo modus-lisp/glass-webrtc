@@ -51,4 +51,5 @@ of a POST, so a browser reaches the desktop without a reachable address."
                ;; a board cannot find the file that way, and the stubs it fell back to answered
                ;; a published shell's payload request with nothing
                (:file "payload-channel")
+               (:file "pointer-channel")
                (:file "gateway-nostr")))

@@ -552,7 +552,45 @@ export async function init(api) {
     // The channel was created by the SHELL, before the offer — see its note on ordering.  All the
     // payload does is hand it to noVNC, which rides an RTCDataChannel as its transport directly.
 
-    const rfb = new RFB(document.getElementById('screen'), ch, {});
+    // POINTER MOVES ON THEIR OWN CHANNEL (stream 106: unordered, never retransmitted).  On the RFB
+    // channel a lost move waited for the browser's SCTP to resend it -- 0.3 s and up -- with every
+    // later move queued behind it; on a lossy link those were most of the worst drag steps.  A move
+    // only needs the LATEST one to arrive: each goes once, and the latest is sent again at 20 and
+    // 60 ms unless a newer one has gone.  Button changes stay on the RFB channel, reliable and in
+    // order with the keys, each sent alone and counted; every 106 message carries the count, which
+    // is how the gateway keeps a press ahead of the drag after it.  See pointer-channel.lisp.
+    // The gateway that served this file is the one that reads 106, so the two always agree.
+    let ptrCh = null;
+    try {
+      ptrCh = pc.createDataChannel('ptr', { ordered: false, maxRetransmits: 0, negotiated: true, id: 106 });
+      ptrCh.binaryType = 'arraybuffer';
+    } catch (_) { ptrCh = null; }
+    let ptrSeq = 0, rfbPointers = 0, lastMask = -1, ptrRepeats = [];
+    const ptrSend = (data) => {
+      const b = data instanceof Uint8Array ? data : new Uint8Array(data);
+      if (b.length !== 6 || b[0] !== 5) return false;
+      ptrRepeats.forEach(clearTimeout); ptrRepeats = [];
+      if (ptrCh && ptrCh.readyState === 'open' && b[1] === lastMask) {
+        // a copy: noVNC hands us a view of the send buffer it is about to reuse
+        const m = new Uint8Array(12), dv = new DataView(m.buffer);
+        dv.setUint32(0, (++ptrSeq) >>> 0); dv.setUint16(4, rfbPointers & 0xffff); m.set(b, 6);
+        const go = () => { try { if (ptrCh.readyState === 'open') ptrCh.send(m); } catch (_) {} };
+        go(); ptrRepeats = [setTimeout(go, 20), setTimeout(go, 60)];
+        return true;
+      }
+      lastMask = b[1]; rfbPointers++;      // this one goes on RFB, alone, and is counted
+      return false;
+    };
+    const rfbCh = new Proxy(ch, {
+      get(t, p) {
+        if (p === 'send') return (data) => (ptrSend(data) ? undefined : t.send(data));
+        const v = Reflect.get(t, p);
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+      set(t, p, v) { t[p] = v; return true; },
+    });
+
+    const rfb = new RFB(document.getElementById('screen'), rfbCh, {});
     window.__rfb = rfb;          // for the size reconciler below, which lives in another scope
     // ASK THE DESKTOP TO BE THIS SIZE, rather than only scaling a picture of one.  noVNC
     // sends SetDesktopSize when the container resizes, glass turns that into a resize of

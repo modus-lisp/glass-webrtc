@@ -454,6 +454,22 @@ silently drop CODE.)"
       state)
     (defun payload-close (state) (declare (ignore state)) nil))))
 
+;; ---- the pointer channel: moves that never wait for a lost packet ------------------------------
+;; Guarded like the two above.  The stubs keep stream 106 CLAIMED (dropping what arrives) and count
+;; nothing: a payload that sends moves there gets a desktop that ignores them until this loads, which
+;; is a worse pointer and nothing else.  See pointer-channel.lisp.
+(unless (fboundp 'pointer-on-message)
+(handler-case
+    (load (asdf:system-relative-pathname "glass-webrtc" "pointer-channel.lisp"))
+  (error (e)
+    (format *error-output* "~&@@ pointer: channel unavailable (~a) — moves ride RFB only~%" e)
+    (finish-output *error-output*)
+    (defun pointer-sid-p (sid) (eql sid 106))
+    (defun make-pointer-state () nil)
+    (defun pointer-on-message (state payload) (declare (ignore state payload)) nil)
+    (defun pointer-note-rfb (state bytes) (declare (ignore state bytes)) nil)
+    (defun pointer-stats (state) (declare (ignore state)) 0))))
+
 ;;; ---- one live session per terminal ------------------------------------------
 ;; A phone never says goodbye.  It locks its screen, changes network, or just reloads the page and
 ;; offers again — and nothing in WebRTC tells the answerer the old session died.  Sessions used to run
@@ -924,6 +940,7 @@ TURN allocation is released (not leaked for ~600s)."
         (warp nil)
         ;; ...and its payload transfer, which is NIL until the phone's shell says hello on 104.
         (payload-ch nil)
+        (ptr (make-pointer-state))          ; stream 106: what moves were forwarded, what waits
         ;; ---- what the session record is built from, all session-local on purpose: a global
         ;; would attribute one phone's ending to another phone's route the moment two terminals
         ;; overlap, which is the exact class of mistake this whole record exists to fix.
@@ -954,7 +971,7 @@ TURN allocation is released (not leaked for ~600s)."
          (setf pump (%glass-pump assoc sid glass link))
          ;; SCTP health every 2 s (per-2s rate + cwnd/flight/outq, to spot a relay-path stall) --
          ;; and the tick that re-watches glass once a backlog has drained.
-         (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)))
+         (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)) (pprev (pointer-stats ptr)))
            (setf stats
                  (cl-transport.loop:every-seconds
                   lp 2.0
@@ -966,12 +983,13 @@ TURN allocation is released (not leaked for ~600s)."
                            (dt (max 1d-3 (/ (float (- tn tp) 1d0) internal-time-units-per-second))))
                       (flet ((d (k) (- (or (getf now k) 0) (or (getf prev k) 0))))
                         (format *error-output*
-                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a (fast ~a rack ~a tlp ~a rto ~a) cwnd ~a flight ~a outq ~a srtt ~a~%"
+                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a (fast ~a rack ~a tlp ~a rto ~a) cwnd ~a flight ~a outq ~a srtt ~a ptr ~a~%"
                                 (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt) (d :rtx)
                                 (d :fast-rtx) (d :rack) (d :tlp) (d :rto-events)
                                 (getf now :cwnd) (getf now :flight) (getf now :send-q)
-                                (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))))
-                      (setf prev now tp tn)))
+                                (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))
+                                (- (pointer-stats ptr) pprev)))
+                      (setf prev now tp tn pprev (pointer-stats ptr))))
                   :what "session stats")))))
      :on-message
      (lambda (assoc sid payload)
@@ -998,6 +1016,14 @@ TURN allocation is released (not leaked for ~600s)."
          ;; stream 104 is the client payload, claimed whether or not PAYLOAD_CHANNEL is set
          ((payload-sid-p sid)
           (setf payload-ch (payload-on-message payload-ch assoc sid payload pub)))
+         ;; stream 106 is pointer MOVES, unordered and unreliable; POINTER-ON-MESSAGE decides
+         ;; whether this one is current, and glass gets a plain RFB PointerEvent
+         ((pointer-sid-p sid)
+          (let ((event (pointer-on-message ptr (as-u8vec payload))))
+            (when (and event glass)
+              (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-INPUT-AT*" (get-internal-real-time))
+              (when (%media-p) (%opt-call "WEBRTC-MEDIA" "NOTE-RFB-INPUT" event))
+              (sb-bsd-sockets:socket-send glass event (length event)))))
          ((and glass (plusp (length payload)))
           (let ((bytes (as-u8vec payload)))
             ;; in video-primary mode drop FramebufferUpdateRequest (type 3, 10 bytes) so glass
@@ -1007,7 +1033,10 @@ TURN allocation is released (not leaked for ~600s)."
               ;; that the picture is about to change
               (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-INPUT-AT*" (get-internal-real-time))
               (when (%media-p) (%opt-call "WEBRTC-MEDIA" "NOTE-RFB-INPUT" bytes))
-              (sb-bsd-sockets:socket-send glass bytes (length bytes)))))))
+              (sb-bsd-sockets:socket-send glass bytes (length bytes))
+              ;; a click glass now has may release the move that was sent after it
+              (let ((held (pointer-note-rfb ptr bytes)))
+                (when held (sb-bsd-sockets:socket-send glass held (length held)))))))))
      :on-close
      (lambda (link reason)
        (let ((err (unless (eq reason :done) (princ-to-string reason))))
