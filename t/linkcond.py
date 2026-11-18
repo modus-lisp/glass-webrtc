@@ -58,9 +58,19 @@ SCENARIOS = [
     (f"slow{i}", dict(delay_ms=60, jitter_ms=20, loss=0.05),      dict(ttd=90, ups=1,  lat=2500))
     for i in (1, 2, 3)
 ]
+# THIN LINKS, run only when named (LINKCOND_ONLY=thin,dial): where the sharp RFB desktop cannot keep
+# up and the fuzzy video one should take over -- what the automatic choice between them is tested
+# on.  Their thresholds are what the AUTO card should manage, not what RFB alone can.
+EXTRA = [
+    ("thin",   dict(delay_ms=60, jitter_ms=10, kbps=300),         dict(ttd=60, ups=1,  lat=2500)),
+    # dial's STEPS: the drag probe sees a step as an edge crossing a 13 px strip, and at 48 kbps
+    # (where auto puts this link) the picture is too soft for most small steps to register --
+    # 4 of 16 measured, with a median of 1.0 s (the sharp desktop alone: 1.7 s).
+    ("dial",   dict(delay_ms=100, jitter_ms=20, kbps=96),         dict(ttd=90, ups=0.5, lat=4000, steps=4)),
+]
 only = [s for s in os.environ.get("LINKCOND_ONLY", "").split(",") if s]
 if only:      # a name, or its stem: slow = slow1,slow2,slow3
-    SCENARIOS = [s for s in SCENARIOS if s[0] in only or s[0].rstrip("0123456789") in only]
+    SCENARIOS = [s for s in SCENARIOS + EXTRA if s[0] in only or s[0].rstrip("0123456789") in only]
 
 fails = []
 def ok(name, cond, detail=""):
@@ -433,6 +443,10 @@ try:
             ctx.add_init_script(ice(turn_ice, True) if link else ice([], False))
             ctx.add_init_script(TAP)
             p = ctx.new_page()
+            # the browser's console, for the reasons noVNC gives only there (an UNCLEAN disconnect)
+            conlog = open(OUT / f"{name}-console.txt", "w")
+            p.on("console", lambda m, f=conlog: (f.write(f"{m.type}: {m.text}\n"), f.flush()))
+            p.on("pageerror", lambda e, f=conlog: (f.write(f"pageerror: {e}\n"), f.flush()))
             t0 = time.time()
             p.goto(f"{BASE}/shell.html?box={BOX_PUB}&relays={RELAY}&signer={OWNER_SEC}")
             r = dict(link=link)
@@ -480,8 +494,9 @@ try:
                     p.screenshot(path=str(OUT / f"{name}.png"))
                     grab = title_bar(OUT / f"{name}.png")[0] or grab
                 m = measure(p, grab); r.update(m)
+                r["mode"] = p.evaluate("window.__deskMode && (window.__deskMode + (window.__deskAuto ? ' (auto)' : ''))")
                 p.screenshot(path=str(OUT / f"{name}-after.png"))
-                ok(f"{name}: drag steps answered", m["lat_n"] >= 12, f"{m['lat_n']}/16")
+                ok(f"{name}: drag steps answered", m["lat_n"] >= th.get("steps", 12), f"{m['lat_n']}/16")
                 ok(f"{name}: input -> update median <= {th['lat']} ms", m["lat_med"] is not None
                    and m["lat_med"] <= th["lat"],
                    f"{m['lat_med']:.0f} ms (p90 {m['lat_p90']:.0f})" if m["lat_med"] is not None else "none")
@@ -524,8 +539,9 @@ try:
                         good = settle("video"); time.sleep(2.5)
                         f1 = p.evaluate(VFRAMES)
                         ok(f"{name}: ...and back to video, frames presented again",
-                           good and f1 is not None and f0 is not None and f1 > f0,
+                           good and f1 is not None and f1 > (f0 or 0),
                            f"mode {p.evaluate('window.__deskMode')}, {(f1 or 0) - (f0 or 0)} video frames")
+                        p.evaluate(click, "auto")                       # hand the choice back
             results[name] = r
             ctx.close()
         browser.close()
@@ -540,6 +556,7 @@ for name, r in results.items():
     print(f"{name:<8} {f(r.get('ttd'), '%6.1f s'):>8} {f(r.get('answer'), '%6.1f s'):>8} {f(r.get('lat_med'), '%5.0f ms'):>8} "
           f"{f(r.get('lat_p90'), '%5.0f ms'):>8} {f(r.get('ups'), '%5.1f'):>7} {f(r.get('kbs'), '%4.0f'):>6}"
           f" {f(r.get('fbu'), '%5.1f'):>6} {f(r.get('kb_per_fbu'), '%6.1f'):>7}  resize asks {r.get('resize_asks')}"
+          f"{'  mode ' + r['mode'] if r.get('mode') else ''}"
           f"{'  video' if r.get('video') else ''}")
 print(f"\nLINKCOND {IMPL}: {'PASS' if not fails else 'FAIL (' + str(len(fails)) + ')'}", flush=True)
 sys.exit(1 if fails else 0)

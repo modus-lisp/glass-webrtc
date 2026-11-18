@@ -164,6 +164,13 @@ active desktop), and on generic arithmetic it was costing ~14% of wall-clock."
                 (setf (aref u ci) (max 0 (min 255 (+ 128 (floor (+ (* -43 r) (* -85 g) (* 128 b)) 256))))
                       (aref v ci) (max 0 (min 255 (+ 128 (floor (+ (* 128 r) (* -107 g) (* -21 b)) 256)))))))))))))
 
+(defvar *capture-hold* nil
+  "A function of no arguments, or NIL: while it returns true the capture asks glass for nothing.
+Set by the gateway to 'the video is paused or the desktop is going out sharp' -- a capture nobody
+encodes still costs glass a second, uncompressed copy of every change, sent from the same thread
+that serves the viewer's own RFB connection.  When it returns false again the next incremental
+request brings everything that changed in the meantime.")
+
 (defun capture-run (c)
   "Read framebuffer updates forever, applying them to the planes and marking DIRTY."
   (let ((s (cap-socket c)))
@@ -219,6 +226,9 @@ active desktop), and on generic arithmetic it was costing ~14% of wall-clock."
                  (incf (cap-n-upd c))
                  (incf (cap-t-conv c) (/ (* 1000d0 (- (get-internal-real-time) tc))
                                          internal-time-units-per-second))))
+             ;; ...unless nobody is encoding it: hold the request (see *CAPTURE-HOLD*)
+             (loop while (and *capture-hold* (not (cap-stop c)) (funcall *capture-hold*))
+                   do (sleep 0.05))
              (%request-update c t))                          ; ask for the next incremental
           (1 (%rd s 5))                                      ; SetColourMapEntries (ignored)
           (2 nil)                                            ; Bell

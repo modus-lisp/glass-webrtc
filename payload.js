@@ -901,7 +901,8 @@ export async function init(api) {
     const qModes = document.createElement('div');
     qModes.style.cssText = 'display:none;gap:4px';
     const modeBtns = new Map();
-    for (const [mode, label] of [['rfb', 'sharp · rfb'], ['video', 'fuzzy · video']]) {
+    window.__deskAuto = false;
+    for (const [mode, label] of [['rfb', 'sharp · rfb'], ['auto', 'auto'], ['video', 'fuzzy · video']]) {
       const b = document.createElement('button');
       b.textContent = label;
       b.style.cssText = 'pointer-events:auto;touch-action:manipulation;flex:1;padding:7px 2px;' +
@@ -916,11 +917,14 @@ export async function init(api) {
     }
     const paintModes = () => {
       qModes.style.display = window.__deskMode ? 'flex' : 'none';
+      // AUTO lit while the box is choosing, and the mode it chose OUTLINED: "auto, sharp just now"
+      const auto = window.__deskAuto;
       for (const [mode, b] of modeBtns) {
-        const on = mode === window.__deskMode;
-        b.style.color = on ? '#7CFC9B' : '#8a949c';
+        const on = mode === 'auto' ? auto : (!auto && mode === window.__deskMode);
+        const chosen = auto && mode === window.__deskMode;
+        b.style.color = on ? '#7CFC9B' : (chosen ? '#cdd6df' : '#8a949c');
         b.style.background = on ? 'rgba(124,252,155,.16)' : 'rgba(255,255,255,.06)';
-        b.style.borderColor = on ? '#7CFC9B' : 'rgba(255,255,255,.18)';
+        b.style.borderColor = on ? '#7CFC9B' : (chosen ? 'rgba(124,252,155,.55)' : 'rgba(255,255,255,.18)');
       }
     };
     const sendMode = mode => {
@@ -938,14 +942,23 @@ export async function init(api) {
       if (!modeAsked) {
         modeAsked = true;
         let want = null; try { want = localStorage.getItem(MODE_KEY); } catch (_) {}
-        if ((want === 'rfb' || want === 'video') && want !== m.mode) sendMode(want);
+        if (want === 'auto' && !m.auto) sendMode('auto');
+        else if ((want === 'rfb' || want === 'video') && (m.auto || want !== m.mode)) sendMode(want);
       }
+      if (!!m.auto !== window.__deskAuto) { window.__deskAuto = !!m.auto; paintModes(); }
       if (m.mode === window.__deskMode) return;
       const was = window.__deskMode; window.__deskMode = m.mode;
-      diag(`desktop is ${m.mode === 'rfb' ? 'RFB (sharp)' : 'VIDEO (fuzzy)'}${was ? ' — was ' + was : ''}`);
+      diag(`desktop is ${m.mode === 'rfb' ? 'RFB (sharp)' : 'VIDEO (fuzzy)'}${m.auto ? ' — the box chose' : ''}` +
+           `${was ? ' — was ' + was : ''}`);
       paintModes();
       if (window.__applyDeskVideo) window.__applyDeskVideo();
-      if (m.mode === 'rfb' && typeof rfb !== 'undefined' && rfb && rfb._sock) {
+      // ONLY ON A CONNECTED RFB.  The box says "rfb" at the start of every auto session, often
+      // before noVNC has finished its handshake -- and a request written then lands in the
+      // handshake, glass reads it as the client's version or security reply, and the stream is
+      // gone (an UNCLEAN disconnect, 3 of 12 sessions on a lossy link).  Not yet connected, the
+      // connect handler asks for the frames itself.
+      if (m.mode === 'rfb' && typeof rfb !== 'undefined' && rfb && rfb._sock &&
+          rfb._rfbConnectionState === 'connected') {
         // a whole frame now, and a second request in flight, as on connect
         try {
           RFB.messages.fbUpdateRequest(rfb._sock, false, 0, 0, rfb._fbWidth, rfb._fbHeight);

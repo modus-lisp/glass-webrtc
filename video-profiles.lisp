@@ -59,6 +59,10 @@ the media stack only has RFB.  The gateway sets the default per session (VIDEO_P
 and the viewer moves it with {\"mode\":\"rfb\"} or {\"mode\":\"video\"} -- in RFB mode the video is
 paused (nothing captured or sent) and the browser's frame requests reach glass again.")
 
+(defvar *desktop-auto* nil
+  "True when the box chooses the mode itself (AUTO-TICK); the viewer pins one with {\"mode\":\"rfb\"}
+or {\"mode\":\"video\"} and hands the choice back with {\"mode\":\"auto\"}.")
+
 (defun desktop-rfb-p ()
   "Is the viewer being sent RFB pixels (not video)?"
   (not (eq *desktop-mode* :video)))
@@ -305,7 +309,7 @@ re-reads it at the top of every pass — plus the backlog quantizer, which lives
     ;; ~,0f would emit "55." — a trailing point with no digits, which is not JSON and takes the
     ;; phone's whole status handler down with it.  Every number here is rounded to an integer or
     ;; given explicit decimals.
-    (format nil "{\"kbps\":~a,\"rung\":~a,\"profile\":\"~a kbps\",\"target_kbs\":~,2f,\"target_fps\":~,1f,\"frame_budget\":~a,\"max_frame_kb\":~,1f,\"cleanup_ms\":~a,\"qi\":~a,\"max_qi\":~a,\"motion_qi\":~a,\"key_qi\":~a,\"key_secs\":~a,\"backlog_qi\":~a,\"desktop_w\":~a,\"desktop_h\":~a,~@[\"mode\":\"~(~a~)\",~]\"rungs\":[~{~a~^,~}]}"
+    (format nil "{\"kbps\":~a,\"rung\":~a,\"profile\":\"~a kbps\",\"target_kbs\":~,2f,\"target_fps\":~,1f,\"frame_budget\":~a,\"max_frame_kb\":~,1f,\"cleanup_ms\":~a,\"qi\":~a,\"max_qi\":~a,\"motion_qi\":~a,\"key_qi\":~a,\"key_secs\":~a,\"backlog_qi\":~a,\"desktop_w\":~a,\"desktop_h\":~a,~@[\"mode\":\"~(~a~)\",~]~:[~;\"auto\":true,~]\"rungs\":[~{~a~^,~}]}"
             kbps (or (rung-index kbps) 0) kbps
             (getf p :target-kbs) (getf p :target-fps)
             (round (* (getf p :target-kbs) 1024) (getf p :target-fps))
@@ -324,6 +328,8 @@ re-reads it at the top of every pass — plus the backlog quantizer, which lives
             (%desktop-width) (%desktop-height)
             ;; which of the two the desktop is going out as -- absent when the box has no choice
             *desktop-mode*
+            ;; ...and whether the box is choosing it (AUTO-TICK) or the viewer pinned it
+            (and *desktop-mode* (boundp '*desktop-auto*) *desktop-auto*)
             *video-rungs*)))
 
 (defun %json-string-value (json key)
@@ -453,7 +459,12 @@ so the phone's stepper shows what the box actually did rather than what was aske
             (format *error-output* "~&[video] ~:[RESUMED by the viewer (keyframe forced)~;PAUSED by the viewer — nothing is being captured or sent~]~%" pause)
             (finish-output *error-output*)))))
     (let ((mode (%json-string-value json "mode")))
+      (when (and *desktop-mode* (equal mode "auto") (not *desktop-auto*))
+        (setf *desktop-auto* t)
+        (format *error-output* "~&[video] the box chooses sharp or fuzzy again (auto)~%")
+        (finish-output *error-output*))
       (when (and *desktop-mode* (member mode '("rfb" "video") :test #'equal))
+        (setf *desktop-auto* nil)                        ; the viewer's choice, pinned
         (let ((want (if (equal mode "rfb") :rfb :video)))
           (unless (eq want *desktop-mode*)
             (setf *desktop-mode* want)
@@ -475,3 +486,91 @@ so the phone's stepper shows what the box actually did rather than what was aske
 ;; session exists, which is why the sender adopts *VIDEO-PROFILE* at the TOP of its loop — the first
 ;; keyframe is the most expensive frame of the session and it has to be coded at the rung's numbers.
 (apply-video-rung (detect-video-rung) :why "startup")
+
+;;; ---- AUTO: sharp while the link carries it, fuzzy when it does not -----------------------------
+;;;
+;;; The sharp desktop (RFB over SCTP) is reliable and ordered, so a link that cannot carry it does
+;;; not drop frames, it QUEUES them: SCTP's window opens wide (nothing is lost on a shaped link), the
+;;; bottleneck's queue fills, and the smoothed RTT climbs from ~100 ms to seconds -- measured: 1-10 s
+;;; on 300 and 96 kbps links, while glass's own send lag stayed low.  So the RTT is the signal, and
+;;; the rate SCTP achieves while it is that high is the link's real capacity -- which is what the
+;;; video's rung is chosen from, because a fuzzy desktop at a rung the link cannot carry never
+;;; paints at all (480 kbps on a 96 kbps link did not).
+;;;
+;;; Fuzzy -> sharp cannot be measured from the video side (it says nothing about what RFB would
+;;; need), so it is PROBED: after a dwell the desktop goes sharp again, and if the RTT climbs it
+;;; comes back and the next dwell doubles.  A brief sharp burst every few minutes is the price of
+;;; noticing that the link got better.
+
+(defparameter *auto-lag-srtt-ms* 700
+  "A smoothed RTT above this, two ticks running (4 s) with data moving, is a link the sharp desktop
+is queueing on.  Ordinary links measured at or below ~270 ms (rtt100, far, slow); shaped thin
+links at 750 ms to 10 s.")
+(defparameter *auto-lag-ticks* 2)
+(defparameter *auto-rung-share* 0.6
+  "The video rung chosen is the highest at or below this share of the rate measured while lagging.")
+(defparameter *auto-probe-secs* 60
+  "The first dwell in fuzzy before trying sharp again.  Not shorter: a probe on a link that cannot
+carry the sharp desktop queues seconds of it there (10 s measured on 96 kbps) before it is noticed.")
+(defparameter *auto-probe-max-secs* 480 "The longest it doubles to.")
+(defparameter *auto-min-moving-kbs* 1.0
+  "KB/s out below which a tick says nothing about the link (an idle desktop's RTT is stale).")
+
+
+(defclass auto-switch ()
+  ((lag-ticks :initform 0 :accessor auto-lag-ticks)       ; consecutive lagging ticks while sharp
+   (samples :initform '() :accessor auto-samples)         ; the link's rate, from saturated lagging ticks
+   (since :initform 0d0 :accessor auto-since)             ; seconds into the session of the last switch
+   (probe-secs :initform *auto-probe-secs* :accessor auto-probe-secs)
+   (probing :initform nil :accessor auto-probing))         ; the current sharp spell is a probe
+  (:documentation "One session's automatic choice between the sharp and fuzzy desktop."))
+
+(defun make-auto-switch () (make-instance 'auto-switch))
+
+(defun auto-rung-for (kbs)
+  "The highest rung (kbps) at or below *AUTO-RUNG-SHARE* of KBS (kilobytes/s), or the lowest."
+  (let ((budget (* 8 kbs *auto-rung-share*)))
+    (or (car (last (remove-if (lambda (r) (> r budget)) *video-rungs*)))
+        (first *video-rungs*))))
+
+(defparameter *auto-saturated-bytes* 16384
+  "Bytes in flight at or above which a lagging tick's rate is the LINK's: the sender had more to
+send than got through.  Below it the tick sent what it had, which says nothing about capacity --
+taking such a tick (1.9 KB/s at a 2 s RTT) put a 300 kbps link on the 5 kbps rung.")
+(defparameter *auto-fallback-rung* 48 "The rung when no tick measured the link.")
+
+(defun %median (xs)
+  (let ((v (sort (copy-list xs) #'<))) (nth (floor (length v) 2) v)))
+
+(defun auto-tick (a mode now-secs out-kbs srtt-ms &optional (flight *auto-saturated-bytes*))
+  "One stats tick of the automatic choice.  MODE is the desktop's now (:RFB or :VIDEO), NOW-SECS the
+session clock, OUT-KBS the rate sent this tick, SRTT-MS the smoothed RTT (or NIL), FLIGHT the
+bytes in flight.  Returns (values :VIDEO kbps) to go fuzzy at that rung, :RFB to try sharp, or NIL."
+  (case mode
+    (:rfb
+     (cond ((and srtt-ms (> srtt-ms *auto-lag-srtt-ms*) (>= out-kbs *auto-min-moving-kbs*))
+            (incf (auto-lag-ticks a))
+            ;; THE LINK'S RATE: only a saturated tick measures it, and the MEDIAN of those -- the
+            ;; first ticks of a lag (and of every probe) burst into the bottleneck's queue at the
+            ;; sender's own rate, and an unsaturated one sent only what it had.
+            (when (>= (or flight 0) *auto-saturated-bytes*) (push out-kbs (auto-samples a)))
+            (when (>= (auto-lag-ticks a) *auto-lag-ticks*)
+              (let ((rung (if (auto-samples a)
+                              (auto-rung-for (%median (auto-samples a)))
+                              *auto-fallback-rung*)))
+                ;; a probe that failed: wait twice as long before the next one
+                (when (auto-probing a)
+                  (setf (auto-probe-secs a) (min *auto-probe-max-secs* (* 2 (auto-probe-secs a)))))
+                (setf (auto-lag-ticks a) 0 (auto-samples a) '()
+                      (auto-since a) now-secs (auto-probing a) nil)
+                (values :video rung))))
+           (t (when (and srtt-ms (<= srtt-ms *auto-lag-srtt-ms*))
+                (setf (auto-lag-ticks a) 0 (auto-samples a) '())
+                ;; a probe that has held for a full dwell is a link that got better
+                (when (and (auto-probing a) (> (- now-secs (auto-since a)) (auto-probe-secs a)))
+                  (setf (auto-probing a) nil (auto-probe-secs a) *auto-probe-secs*)))
+              nil)))
+    (:video
+     (when (> (- now-secs (auto-since a)) (auto-probe-secs a))
+       (setf (auto-since a) now-secs (auto-probing a) t (auto-lag-ticks a) 0)
+       :rfb))))

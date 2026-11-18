@@ -364,7 +364,33 @@ silently drop CODE.)"
 ;; ...and *DESKTOP-MODE* (:VIDEO, :RFB or NIL), the same way: the viewer moves it on the control
 ;; channel; this file sets each session's default and obeys it below.
 (defvar *desktop-mode*)
+(defvar *desktop-auto*)
+(defparameter *desktop-auto-default* (not (equal (uiop:getenv "DESKTOP_AUTO") "0"))
+  "Whether a video-capable session starts with the box choosing sharp or fuzzy (AUTO-TICK).  It
+starts SHARP: a good link should get the sharp desktop at once, and a link that cannot carry it is
+noticed within seconds.  DESKTOP_AUTO=0: start fuzzy and stay there unless the viewer moves it.")
 (defun %desktop-mode () (and (boundp '*desktop-mode*) *desktop-mode*))
+(defun %auto-step (auto assoc started out-kbs srtt-ms flight)
+  "One tick of the box's own choice between the sharp and fuzzy desktop: act on AUTO-TICK's verdict
+and tell the viewer at once, on the control stream, rather than at its next poll."
+  (let ((secs (/ (float (- (get-internal-real-time) (or started 0)) 1d0) internal-time-units-per-second)))
+    (multiple-value-bind (to rung) (auto-tick auto *desktop-mode* secs out-kbs srtt-ms flight)
+      (when to
+        (case to
+          (:video (ignore-errors (apply-video-rung rung :why "auto: the link cannot carry the sharp desktop"))
+                  (%set-opt-val "WEBRTC-MEDIA" "*FORCE-KEYFRAME*" t))
+          (:rfb nil))
+        (setf *desktop-mode* to)
+        (format *error-output* "~&[auto] desktop -> ~:[SHARP (probing: ~*the link may carry it now)~;FUZZY at ~a kbps (srtt ~,0f ms, ~,1f KB/s)~]~%"
+                (eq to :video) rung (or srtt-ms 0) out-kbs)
+        (finish-output *error-output*)
+        (ignore-errors (sctp-send-string assoc +control-stream-id+ (video-profile-status)))))))
+
+(defun %glass-send-lag ()
+  "glass's GLASS:*SEND-LAG* (ms, an EWMA of how long a change waited to be sent) when glass's RFB
+server runs in this process, else 0."
+  (let ((s (find-symbol "*SEND-LAG*" "GLASS")))
+    (if (and s (boundp s)) (float (symbol-value s) 1d0) 0d0)))
 (defvar *last-assoc* nil)
 
 ;; Connection health, counted rather than only logged.  These ride the stats file, so the pipeline
@@ -864,8 +890,13 @@ that stops all of it."
                  ;; video: our from-scratch VP8 keyframes, over the same SRTP keys (own SSRC)
                  (when (and ctx *video-pt*)
                    (when *video-primary*
-                     ;; a session starts as video; the viewer may move it to RFB and back
-                     (setf *desktop-mode* :video)
+                     ;; the session's mode: chosen by the box (sharp first, AUTO-TICK) unless
+                     ;; DESKTOP_AUTO=0 says start fuzzy; the viewer may pin either
+                     (setf *desktop-auto* *desktop-auto-default*
+                           *desktop-mode* (if *desktop-auto-default* :rfb :video))
+                     ;; the capture asks glass for nothing while nobody encodes it
+                     (setf *capture-hold* (lambda () (or (and (boundp '*video-paused*) *video-paused*)
+                                                         (eq (%desktop-mode) :rfb))))
                      (setf cap (ignore-errors (capture-start *glass-host* *glass-port*)))
                      (format *error-output* "~&[gw-nostr] desktop capture ~:[FAILED~;up~] (video-primary)~%" cap))
                    (setf video-stop
@@ -977,7 +1008,8 @@ TURN allocation is released (not leaked for ~600s)."
          (setf pump (%glass-pump assoc sid glass link))
          ;; SCTP health every 2 s (per-2s rate + cwnd/flight/outq, to spot a relay-path stall) --
          ;; and the tick that re-watches glass once a backlog has drained.
-         (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)) (pprev (pointer-stats ptr)))
+         (let ((prev (sctp-stats assoc)) (tp (get-internal-real-time)) (pprev (pointer-stats ptr))
+               (auto (and (fboundp 'make-auto-switch) (make-auto-switch))))
            (setf stats
                  (cl-transport.loop:every-seconds
                   lp 2.0
@@ -989,12 +1021,20 @@ TURN allocation is released (not leaked for ~600s)."
                            (dt (max 1d-3 (/ (float (- tn tp) 1d0) internal-time-units-per-second))))
                       (flet ((d (k) (- (or (getf now k) 0) (or (getf prev k) 0))))
                         (format *error-output*
-                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a (fast ~a rack ~a tlp ~a rto ~a) cwnd ~a flight ~a outq ~a srtt ~a ptr ~a~%"
+                                "~&[stats] out ~,1fKB/s in ~,1fKB/s rtx ~a (fast ~a rack ~a tlp ~a rto ~a) cwnd ~a flight ~a outq ~a srtt ~a ptr ~a lag ~,0fms~%"
                                 (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt) (d :rtx)
                                 (d :fast-rtx) (d :rack) (d :tlp) (d :rto-events)
                                 (getf now :cwnd) (getf now :flight) (getf now :send-q)
                                 (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))
-                                (- (pointer-stats ptr) pprev)))
+                                (- (pointer-stats ptr) pprev)
+                                ;; glass's send backlog (how long its changes waited to go out), when
+                                ;; glass is in this process -- the card's one-process desktop
+                                (%glass-send-lag)))
+                      ;; SHARP OR FUZZY, chosen here when the box is choosing (video-profiles.lisp)
+                      (when (and auto (%desktop-mode) (boundp '*desktop-auto*) *desktop-auto*)
+                        (%auto-step auto assoc established-at
+                                    (/ (- (or (getf now :bytes-out) 0) (or (getf prev :bytes-out) 0)) 1024d0 dt)
+                                    (getf now :srtt-ms) (getf now :flight)))
                       (setf prev now tp tn pprev (pointer-stats ptr))))
                   :what "session stats")))))
      :on-message
