@@ -1,4 +1,4 @@
-import { mountChat } from '/home/claude/operandi-gui/client/chat.js';
+import { mountChat } from '../operandi-gui/client/chat.js';
 // payload.js — everything that only matters once the connection is up.
 //
 // ===================================================================================================
