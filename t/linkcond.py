@@ -236,6 +236,41 @@ def ice(servers, relay_only):
             f"   return new P(Object.assign({{}}, cfg, {{ iceServers: {json.dumps(servers)}{pol} }})); }};"
             " window.RTCPeerConnection.prototype = P.prototype; })();")
 
+AUDIO_STATS = """async () => {
+  const pc = (window.__pcs || []).filter(p => p.connectionState === 'connected').pop();
+  if (!pc) return null;
+  const s = await pc.getStats(); let a = null;
+  s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') a = r; });
+  if (!a) return null;
+  const k = ['packetsReceived','packetsLost','jitter','totalSamplesReceived','concealedSamples',
+             'silentConcealedSamples','insertedSamplesForDeceleration','removedSamplesForAcceleration',
+             'jitterBufferDelay','jitterBufferEmittedCount','jitterBufferTargetDelay'];
+  const o = {}; for (const x of k) o[x] = a[x]; return o;
+}"""
+
+def audio_check(p, name):
+    """LINKCOND_AUDIO=1 (with a card playing CARD_TEST_TONE): how much of the audio the browser had to
+    time-stretch.  NetEQ plays the jitter buffer faster (acceleration: samples removed) or slower
+    (deceleration: samples inserted) to keep its target delay when packets arrive unevenly -- on a
+    steady tone, and on music, that is heard as the pitch wavering."""
+    # the speaker: play the remote audio (headless Chrome has a fake output that pulls it)
+    p.evaluate("""() => { for (const a of document.querySelectorAll('audio')) { a.muted = false; a.play().catch(()=>{}); } }""")
+    a0 = p.evaluate(AUDIO_STATS); time.sleep(15); a1 = p.evaluate(AUDIO_STATS)
+    if not (a0 and a1):
+        dbg = p.evaluate("""async () => { const out = [];
+          for (const pc of (window.__pcs || [])) { const types = new Set();
+            try { (await pc.getStats()).forEach(r => types.add(r.type + (r.kind ? ':' + r.kind : ''))); } catch (e) {}
+            out.push(pc.connectionState + ' ' + pc.getTransceivers().map(t => t.receiver.track.kind + '/' + t.direction).join(',') + ' [' + [...types].join(' ') + ']'); }
+          return out; }""")
+        print(f"  audio: no inbound audio stream ({a0!r}) pcs {dbg}", flush=True); return
+    d = {k: (a1[k] or 0) - (a0[k] or 0) for k in a1 if isinstance(a1[k], (int, float))}
+    got = max(1, d.get("totalSamplesReceived", 0))
+    stretched = d.get("insertedSamplesForDeceleration", 0) + d.get("removedSamplesForAcceleration", 0)
+    delay = (d.get("jitterBufferDelay", 0) / max(1, d.get("jitterBufferEmittedCount", 0))) * 1000
+    print(f"  audio: {d.get('packetsReceived',0)} pkts, lost {d.get('packetsLost',0)}, jitter {1000*(a1.get('jitter') or 0):.0f} ms, "
+          f"stretched {100*stretched/got:.1f}% (decel {d.get('insertedSamplesForDeceleration',0)}, accel {d.get('removedSamplesForAcceleration',0)}), "
+          f"concealed {100*d.get('concealedSamples',0)/got:.1f}%, buffer {delay:.0f} ms (target {1000*(a1.get('jitterBufferTargetDelay') or 0)/max(1,a1.get('jitterBufferEmittedCount') or 1):.0f})", flush=True)
+
 def title_bar(png):
     """(x, y, left) inside the topmost window title bar on the screenshot, or None: the first run
     of light-grey rows at least 150 px wide, LEFT where that run begins.  Also the share of the
@@ -442,6 +477,10 @@ try:
             ctx = browser.new_context(viewport={"width": 1280, "height": 720})
             ctx.add_init_script(ice(turn_ice, True) if link else ice([], False))
             ctx.add_init_script(TAP)
+            # every peer connection the page makes, for AUDIO_STATS (the client's is module-scoped)
+            ctx.add_init_script("""(() => { const P = window.RTCPeerConnection; window.__pcs = [];
+              window.RTCPeerConnection = function (...a) { const pc = new P(...a); window.__pcs.push(pc); return pc; };
+              window.RTCPeerConnection.prototype = P.prototype; })();""")
             p = ctx.new_page()
             # the browser's console, for the reasons noVNC gives only there (an UNCLEAN disconnect)
             conlog = open(OUT / f"{name}-console.txt", "w")
@@ -493,6 +532,8 @@ try:
                     time.sleep(0.5)
                     p.screenshot(path=str(OUT / f"{name}.png"))
                     grab = title_bar(OUT / f"{name}.png")[0] or grab
+                if os.environ.get("LINKCOND_AUDIO"):
+                    audio_check(p, name)
                 m = measure(p, grab); r.update(m)
                 r["mode"] = p.evaluate("window.__deskMode && (window.__deskMode + (window.__deskAuto ? ' (auto)' : ''))")
                 p.screenshot(path=str(OUT / f"{name}-after.png"))

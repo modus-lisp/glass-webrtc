@@ -54,7 +54,7 @@
   (setf (glass.wm:wm-apps wm)
         (mapcar (lambda (a) (destructuring-bind (l f &key (width 400) (height 300)) a (list l f width height)))
                 (glass.wm:wm-available-apps)))
-  (dolist (label '("Files" "Browser" "Podcasts" "Speak" "Listen"))
+  (dolist (label '("Files" "Browser" "Podcasts" "Speak" "Listen" "Media"))
     (when (find label (glass.wm:wm-apps wm) :key #'first :test #'string=)
       (let ((s (handler-case (glass.wm:wm-open wm label) (error (e) (format t "~&  open ~a: ~a~%" label e) nil))))
         (ok (format nil "~a opens" label) s)

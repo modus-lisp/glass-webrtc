@@ -3113,9 +3113,34 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
     let vidKbs = 0, vidFps = 0, lastVid = null;      // the VP8 stream's own rate, for the quality panel
     let lastKeyAsk = 0;                              // rate-limits the "I still have no picture" ask
     let lastHeal = 0;                                // ... and the repaint watchdog's intervention
+    let lastAud = null, lastAudT = 0;                // the AUDIO's jitter-buffer counters, every 10 s
+    // HOW MUCH OF THE SOUND THE BROWSER TIME-STRETCHED.  A jitter buffer plays faster (acceleration:
+    // samples removed) or slower (deceleration: samples inserted) to hold its target delay when
+    // packets arrive unevenly -- on music that is heard as the pitch wavering.  Said to the box's log
+    // every 10 s while sound is arriving, so a listener's "it keeps changing pitch" has numbers.
+    function noteAudio(s) {
+      let a = null; s.forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') a = r; });
+      const now = performance.now();
+      if (!a || now - lastAudT < 10000) return;
+      const cur = { got: a.totalSamplesReceived || 0, dec: a.insertedSamplesForDeceleration || 0,
+                    acc: a.removedSamplesForAcceleration || 0, con: a.concealedSamples || 0,
+                    pk: a.packetsReceived || 0, lost: a.packetsLost || 0,
+                    jbd: a.jitterBufferDelay || 0, jbn: a.jitterBufferEmittedCount || 0,
+                    jbt: a.jitterBufferTargetDelay || 0 };
+      if (lastAud && cur.got > lastAud.got) {
+        const got = cur.got - lastAud.got, n = Math.max(1, cur.jbn - lastAud.jbn);
+        diag(`audio: ${cur.pk - lastAud.pk} pkts lost ${cur.lost - lastAud.lost} jitter ${Math.round(1000 * (a.jitter || 0))}ms` +
+             ` stretched ${(100 * ((cur.dec - lastAud.dec) + (cur.acc - lastAud.acc)) / got).toFixed(1)}%` +
+             ` (slower ${cur.dec - lastAud.dec} faster ${cur.acc - lastAud.acc})` +
+             ` concealed ${(100 * (cur.con - lastAud.con) / got).toFixed(1)}%` +
+             ` buffer ${Math.round(1000 * (cur.jbd - lastAud.jbd) / n)}ms target ${Math.round(1000 * (cur.jbt - lastAud.jbt) / n)}ms`);
+      }
+      lastAud = cur; lastAudT = now;
+    }
     async function pollPath() {
       try {
         const s = await pc.getStats(); let pair = null;
+        try { noteAudio(s); } catch (_) {}
         s.forEach(r => { if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected)) pair = r; });
         if (!pair) s.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = s.get(r.selectedCandidatePairId); });
         if (pair) {
