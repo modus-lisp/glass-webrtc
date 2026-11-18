@@ -23,7 +23,7 @@ ln -sfn "$real/node_modules" "$build/node_modules"
 [ -d "$real/novnc" ] && ln -sfn "$real/novnc" "$build/novnc"
 
 SHUTTLE="${SHUTTLE:-$(command -v shuttle || true)}"
-[ -n "$SHUTTLE" ] || for c in "$real"/../shuttle/bin/shuttle /home/claude/shuttle/bin/shuttle; do
+[ -n "$SHUTTLE" ] || for c in "$src"/../shuttle/bin/shuttle "$real"/../shuttle/bin/shuttle /home/claude/shuttle/bin/shuttle; do
   [ -x "$c" ] && SHUTTLE="$c" && break
 done
 [ -n "$SHUTTLE" ] || { echo "no shuttle found (expected a sibling ../shuttle checkout)"; exit 1; }
