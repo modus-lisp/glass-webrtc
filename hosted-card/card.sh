@@ -19,6 +19,8 @@
 #                with CARD_DESK=lean), so no separate desktop is started and DESK_IMPL is unused
 #   CARD_VIDEO=1 the desktop as a VP8 stream on a bandwidth ladder the phone picks from (the full
 #                gateway; SBCL) -- see card-gateway.lisp
+#   CARD_CONTROL=1 evaluate Lisp in the running card: a UNIX socket at $CARD_DIR/TAG.control, 0600,
+#                this uid only -- `hosted-card/card-eval $CARD_DIR/TAG.control '(+ 1 2)'` (one process)
 #   CARD_APPS=files,browser,podcasts,voice (or all) the McCLIM desktop's apps on the window
 #                manager's menu, with GLASS_VOICE / GLASS_EARS for the voice -- see card-apps.lisp
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
@@ -67,6 +69,7 @@ T0=$(date +%s)
   fi && export GLASS_NOSTR_SEC=$NOSTR_SEC
   export GLASS_NOSTR_ALLOW=$OWNER GLASS_HOST=127.0.0.1 GLASS_PORT=$DPORT
   [ "${CARD_VIDEO:-}" = 1 ] && export VIDEO_PRIMARY=1
+  export CARD_CONTROL_PATH=$CARD_DIR/$TAG.control
   export GLASS_ADMISSION_HOST=127.0.0.1 GLASS_ADMISSION_PORT=$((DPORT+1)) CARD_STORE=$STORE MODUS_ROOT
   export NOSTR_RELAYS=${NOSTR_RELAYS:-wss://relay.snort.social,wss://nostr.oxtr.dev,wss://relay.primal.net}
   export PAYLOAD_CHANNEL=1 PAYLOAD_FILE=${PAYLOAD_FILE:-$HERE/../payload.js}

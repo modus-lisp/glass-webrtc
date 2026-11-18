@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""card-eval SOCKET [FORM ...] -- evaluate Lisp forms in a running card (card-control.lisp).
+
+With FORMs, sends each and prints what came back; with none, reads forms from stdin.  The socket
+is the card's $CARD_DIR/TAG.control, made when the card started with CARD_CONTROL=1."""
+import socket, sys
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sys.argv[1])
+    forms = sys.argv[2:] or [sys.stdin.read()]
+    f = s.makefile("rw", encoding="utf-8", newline="\n")
+    for form in forms:
+        f.write(form + "\n"); f.flush()
+        # one answer per top-level form; a stdin batch may hold several, so read until EOF then
+        if not sys.argv[2:]:
+            s.shutdown(socket.SHUT_WR)
+            sys.stdout.write(f.read().replace("--\n", "")); return
+        for line in f:
+            if line == "--\n":
+                break
+            sys.stdout.write(line)
+    s.close()
+
+main()

@@ -351,11 +351,23 @@ silently drop CODE.)"
         (values (gethash "sdp" j) (gethash "code" j))
         (values payload nil))))
 
-(defun glass-connect ()
+(defvar *glass-seat-port-fn* nil
+  "A function of a peer's key returning the desktop port of THAT peer's seat, or NIL for one
+desktop port shared by every session.  Set by a host whose desktop runs in this process and has
+seats (hosted-card/card-gateway.lisp, glass.wm:WM-SEAT-PORT): each device then gets its own pointer,
+focus, window arrangement, menus, clipboard and screen size over the same running apps.")
+
+(defun glass-connect (&optional key)
   ;; GLASS:OPEN-CONNECTION takes the endpoint in either form and sets TCP_NODELAY where there is
   ;; a Nagle to disable (there is none on a socket file, and it ignores the ENOPROTOOPT).  No
   ;; Nagle on the tiny FBUR/input path is the same reason it always was.
-  (values (glass:open-connection :host *glass-host* :port *glass-port*)))
+  (let ((port (or (and key *glass-seat-port-fn*
+                       (handler-case (funcall *glass-seat-port-fn* key)
+                         (error (e) (format *error-output* "~&[gw-nostr] no seat for ~a: ~a -- the shared one~%"
+                                            (subseq key 0 (min 8 (length key))) e)
+                           nil)))
+                  *glass-port*)))
+    (values (glass:open-connection :host *glass-host* :port port))))
 
 ;; video-profiles.lisp's (the media half) owns *VIDEO-PAUSED*; the video source below reads it.
 ;; Proclaimed special here, unbound, so this file compiles on its own (unix-socket-test.lisp
@@ -996,7 +1008,7 @@ TURN allocation is released (not leaked for ~600s)."
        (when (%media-p) (setf media-stop (%start-media conn agent pub))))
      :on-ready
      (lambda (assoc sid)
-       (setf glass (glass-connect) *last-assoc* assoc)
+       (setf glass (glass-connect pub) *last-assoc* assoc)          ; this device's seat
        (incf *sessions-ok*)
        ;; The session is ESTABLISHED here, and this is the clock the survival number is measured
        ;; from: not the offer (which includes however long ICE spent choosing) but the moment the

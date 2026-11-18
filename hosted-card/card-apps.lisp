@@ -11,14 +11,16 @@
 ;;;;   voice     Speak and Listen windows, and "Speak selection" / "Speak clipboard" in the menus:
 ;;;;             glass/voice-apps over glass/speech (chord, GLASS_VOICE) and glass/hearing (stave,
 ;;;;             GLASS_EARS), with the phone's microphone taken on the RFB port + 11
-;;;;   media     Media's file player (warp's warp-media/glass) over GLASS_MUSIC or ~/Music; without
-;;;;             it Media is its Stations alone
+;;;;   media     Media's Music tab (warp's warp-media/glass) over GLASS_MUSIC or ~/Music, and its
+;;;;             Pictures tab (glass/media-pictures) over GLASS_PICTURES or ~/Pictures, and its Documents
+;;;;             tab (glass/media-documents, PDFs through folio) over GLASS_DOCUMENTS or ~/Documents; without them
+;;;;             Media is its Stations alone
 ;;;;   all       every one of them
 ;;;;
 ;;;; Unset, nothing is loaded and the card is what it was -- on the board as everywhere else.
 ;;;; Each is loaded on its own and a failure costs only that app, with a line saying why.
 ;;;;
-;;;; SOUND.  Podcasts and the voice need the desktop's sound to reach the phone, so either one loads
+;;;; SOUND.  Podcasts, Media and the voice need the desktop's sound to reach the phone, so either one loads
 ;;;; glass/wm-sound and CARD-APPS-SOUND-P says to serve it on the RFB port + 10, where the gateway
 ;;;; listens (gateway-nostr.lisp *AUDIO-PORT*).  The window manager's mixer is then the session's,
 ;;;; so the voice and the player are heard in the one mix the gateway takes.
@@ -70,11 +72,13 @@ card's registry -- one level under MODUS_ROOT -- does not reach."
                             (:browser '("loom/glass"))
                             (:podcasts '("spool/desk"))
                             (:voice '("glass/voice-apps" "glass/speech" "glass/hearing" "glass/mic-stream"))
-                            (:media (%card-find-warp-systems) '("warp-media/glass"))
+                            (:media (%card-find-warp-systems) '("warp-media/glass" "glass/media-pictures" "glass/media-documents"))
                             (t (format t "~&card-apps: no app called ~(~a~)~%" app) nil)))
       (push app *card-apps*)))
   (when (member :media *card-apps*) (%card-media-root))
-  (when (card-apps-sound-p) (%card-load :sound '("glass/wm-sound")))
+  ;; the sound, and the Mixer -- each source's level, mute and gain, and who is listening -- on
+  ;; the menu wherever there is sound to look at
+  (when (card-apps-sound-p) (%card-load :sound '("glass/wm-sound" "glass/mixer-desk")))
   (finish-output)
   (setf *card-apps* (nreverse *card-apps*)))
 

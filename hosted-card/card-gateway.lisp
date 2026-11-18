@@ -193,6 +193,22 @@
     (let ((listener (apply #'call "GLASS.WM" "START-WM" rport :width 640 :height 480
                            (card-wm-sound-args rport))))
       (start-card-app-services rport)
+      ;; SEATS: each device its own pointer, focus, window arrangement, menus, clipboard and screen
+      ;; size over the same apps (glass.wm:WM-SEAT-PORT).  The FIRST device is the home seat -- the
+      ;; desktop's own port, whose moves are everyone's default and whose screen shrinks windows --
+      ;; so a card with one phone is the card it always was.  CARD_SEATS=0: one shared seat.
+      (unless (equal (env "CARD_SEATS") "0")
+        (let ((home-key nil) (lock (sb-thread:make-mutex :name "card-seats")))
+          (set-by-name "WEBRTC-DATA" "*GLASS-SEAT-PORT-FN*"
+                       (lambda (key)
+                         (sb-thread:with-mutex (lock)
+                           (unless home-key (setf home-key key))
+                           (if (equal key home-key)
+                               rport
+                               (call "GLASS.WM" "WM-SEAT-PORT" rport key)))))))
+      ;; CARD_CONTROL=1: a UNIX socket that evaluates forms in this image (card-control.lisp)
+      (load (merge-pathnames "card-control.lisp" *load-truename*))
+      (start-card-control)
       (format t "~&card-gateway: desktop on 127.0.0.1:~d (one process)~%" rport) (finish-output)
       #+modus
       (let* ((pump-sym (find-symbol "PUMP" "CL-NOSTR.RELAY"))
