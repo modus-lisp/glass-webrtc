@@ -51,6 +51,18 @@
 
 (defun control-sid-p (sid) (eql sid +control-stream-id+))
 
+(defvar *desktop-mode* nil
+  "How the desktop reaches the viewer, when the box can do both: :VIDEO (the VP8 stream on the
+ladder -- soft, cheap, keeps moving on a bad link) or :RFB (glass's own pixels over the data
+channel -- sharp, and what a good link should get).  NIL when there is no choice: a box without
+the media stack only has RFB.  The gateway sets the default per session (VIDEO_PRIMARY says which)
+and the viewer moves it with {\"mode\":\"rfb\"} or {\"mode\":\"video\"} -- in RFB mode the video is
+paused (nothing captured or sent) and the browser's frame requests reach glass again.")
+
+(defun desktop-rfb-p ()
+  "Is the viewer being sent RFB pixels (not video)?"
+  (not (eq *desktop-mode* :video)))
+
 (defvar *video-paused* nil
   "When true, the capture source reports NOTHING CHANGED and the desktop stops going out.
 
@@ -293,7 +305,7 @@ re-reads it at the top of every pass — plus the backlog quantizer, which lives
     ;; ~,0f would emit "55." — a trailing point with no digits, which is not JSON and takes the
     ;; phone's whole status handler down with it.  Every number here is rounded to an integer or
     ;; given explicit decimals.
-    (format nil "{\"kbps\":~a,\"rung\":~a,\"profile\":\"~a kbps\",\"target_kbs\":~,2f,\"target_fps\":~,1f,\"frame_budget\":~a,\"max_frame_kb\":~,1f,\"cleanup_ms\":~a,\"qi\":~a,\"max_qi\":~a,\"motion_qi\":~a,\"key_qi\":~a,\"key_secs\":~a,\"backlog_qi\":~a,\"desktop_w\":~a,\"desktop_h\":~a,\"rungs\":[~{~a~^,~}]}"
+    (format nil "{\"kbps\":~a,\"rung\":~a,\"profile\":\"~a kbps\",\"target_kbs\":~,2f,\"target_fps\":~,1f,\"frame_budget\":~a,\"max_frame_kb\":~,1f,\"cleanup_ms\":~a,\"qi\":~a,\"max_qi\":~a,\"motion_qi\":~a,\"key_qi\":~a,\"key_secs\":~a,\"backlog_qi\":~a,\"desktop_w\":~a,\"desktop_h\":~a,~@[\"mode\":\"~(~a~)\",~]\"rungs\":[~{~a~^,~}]}"
             kbps (or (rung-index kbps) 0) kbps
             (getf p :target-kbs) (getf p :target-fps)
             (round (* (getf p :target-kbs) 1024) (getf p :target-fps))
@@ -310,6 +322,8 @@ re-reads it at the top of every pass — plus the backlog quantizer, which lives
             ;; encoder downscales, so a 1468x566 desktop arrives as 366x140 and only the ASPECT
             ;; survives.
             (%desktop-width) (%desktop-height)
+            ;; which of the two the desktop is going out as -- absent when the box has no choice
+            *desktop-mode*
             *video-rungs*)))
 
 (defun %json-string-value (json key)
@@ -437,6 +451,15 @@ so the phone's stepper shows what the box actually did rather than what was aske
             (setf *video-paused* pause)
             (unless pause (%set-opt-val "WEBRTC-MEDIA" "*FORCE-KEYFRAME*" t))
             (format *error-output* "~&[video] ~:[RESUMED by the viewer (keyframe forced)~;PAUSED by the viewer — nothing is being captured or sent~]~%" pause)
+            (finish-output *error-output*)))))
+    (let ((mode (%json-string-value json "mode")))
+      (when (and *desktop-mode* (member mode '("rfb" "video") :test #'equal))
+        (let ((want (if (equal mode "rfb") :rfb :video)))
+          (unless (eq want *desktop-mode*)
+            (setf *desktop-mode* want)
+            (when (eq want :video) (%set-opt-val "WEBRTC-MEDIA" "*FORCE-KEYFRAME*" t))
+            (format *error-output* "~&[video] desktop now goes out as ~:[VIDEO (keyframe forced)~;RFB -- video paused, frame requests reach glass~]~%"
+                    (eq want :rfb))
             (finish-output *error-output*)))))
     (let ((req (%json-string-value json "request")))
       (when (equal req "keyframe")

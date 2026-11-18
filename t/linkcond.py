@@ -499,6 +499,33 @@ try:
                     ok(f"{name}: ...and followed a phone-shaped window", good,
                        v and f"desktop {v[0]}x{v[1]}, window {v[2]}x{v[3]}")
                     p.screenshot(path=str(OUT / f"{name}-phone.png"))
+                    # SHARP OR FUZZY, switched live -- only on a box that offers both (a video card).
+                    if p.evaluate("window.__deskMode"):
+                        click = ("(label) => { const b = [...document.querySelectorAll('button')]"
+                                 ".find(b => b.textContent === label); if (b) b.click(); return !!b; }")
+                        def settle(mode, wait=8):
+                            t1 = time.time()
+                            while time.time() - t1 < wait:
+                                if p.evaluate("window.__deskMode") == mode: return True
+                                time.sleep(0.25)
+                            return False
+                        p.evaluate(FBU)
+                        u0 = p.evaluate(FBU)
+                        p.evaluate(click, "sharp · rfb")
+                        good = settle("rfb"); time.sleep(2.5)            # the Clock ticks: RFB frames
+                        u1 = p.evaluate(FBU)
+                        hidden = p.evaluate("getComputedStyle(window.__vidEl).visibility") == "hidden"
+                        ok(f"{name}: switched live to RFB -- video hidden, glass's frames arriving",
+                           good and hidden and u1 > u0, f"mode {p.evaluate('window.__deskMode')}, "
+                           f"video {'hidden' if hidden else 'SHOWN'}, {u1 - u0} RFB updates")
+                        p.screenshot(path=str(OUT / f"{name}-rfb.png"))
+                        f0 = p.evaluate(VFRAMES)
+                        p.evaluate(click, "fuzzy · video")
+                        good = settle("video"); time.sleep(2.5)
+                        f1 = p.evaluate(VFRAMES)
+                        ok(f"{name}: ...and back to video, frames presented again",
+                           good and f1 is not None and f0 is not None and f1 > f0,
+                           f"mode {p.evaluate('window.__deskMode')}, {(f1 or 0) - (f0 or 0)} video frames")
             results[name] = r
             ctx.close()
         browser.close()

@@ -361,6 +361,10 @@ silently drop CODE.)"
 ;; Proclaimed special here, unbound, so this file compiles on its own (unix-socket-test.lisp
 ;; compiles it without the media half) and a lean build that never makes a video source is fine.
 (defvar *video-paused*)
+;; ...and *DESKTOP-MODE* (:VIDEO, :RFB or NIL), the same way: the viewer moves it on the control
+;; channel; this file sets each session's default and obeys it below.
+(defvar *desktop-mode*)
+(defun %desktop-mode () (and (boundp '*desktop-mode*) *desktop-mode*))
 (defvar *last-assoc* nil)
 
 ;; Connection health, counted rather than only logged.  These ride the stats file, so the pipeline
@@ -860,6 +864,8 @@ that stops all of it."
                  ;; video: our from-scratch VP8 keyframes, over the same SRTP keys (own SSRC)
                  (when (and ctx *video-pt*)
                    (when *video-primary*
+                     ;; a session starts as video; the viewer may move it to RFB and back
+                     (setf *desktop-mode* :video)
                      (setf cap (ignore-errors (capture-start *glass-host* *glass-port*)))
                      (format *error-output* "~&[gw-nostr] desktop capture ~:[FAILED~;up~] (video-primary)~%" cap))
                    (setf video-stop
@@ -881,7 +887,7 @@ that stops all of it."
                             ;; to know nothing about pausing.  See *VIDEO-PAUSED*.
                             :source (when cap
                                       (lambda ()
-                                        (unless *video-paused*
+                                        (unless (or *video-paused* (eq (%desktop-mode) :rfb))
                                           (capture-take cap :scale (%opt-call "WEBRTC-MEDIA" "VIDEO-SCALE")))))
                             :on-stats (lambda (v)
                                         (setf *last-video-stats* v)
@@ -1027,8 +1033,10 @@ TURN allocation is released (not leaked for ~600s)."
          ((and glass (plusp (length payload)))
           (let ((bytes (as-u8vec payload)))
             ;; in video-primary mode drop FramebufferUpdateRequest (type 3, 10 bytes) so glass
-            ;; sends no pixels over SCTP; everything else (input) passes through
-            (unless (and *video-primary* (= 10 (length bytes)) (= 3 (aref bytes 0)))
+            ;; sends no pixels over SCTP; everything else (input) passes through.  Not when the
+            ;; viewer has moved the desktop to RFB (*DESKTOP-MODE*): then glass's pixels are the view.
+            (unless (and *video-primary* (not (eq (%desktop-mode) :rfb))
+                         (= 10 (length bytes)) (= 3 (aref bytes 0)))
               ;; AND TELL THE VIDEO SENDER: a keystroke is the earliest warning the box can have
               ;; that the picture is about to change
               (%set-opt-val "WEBRTC-MEDIA" "*VIDEO-INPUT-AT*" (get-internal-real-time))

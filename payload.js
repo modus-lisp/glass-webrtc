@@ -68,6 +68,12 @@ export async function init(api) {
   const setDetail = api.ui.setDetail;
   const vidEl    = api.video.el;
   const videoPrimary = api.video.primary;
+  // THE DESKTOP'S MODE, live: 'video', 'rfb', or null when the box offers no choice (set from the
+  // box's status; see the mode buttons in the stream panel).  videoPrimary says the PAGE can show
+  // video; this says whether it is showing it now -- what the video watchdogs must ask, or they
+  // keep "healing" a stream that is paused on purpose.
+  window.__deskMode = null;
+  const videoLive = () => videoPrimary && window.__deskMode !== 'rfb';
   const syncVideo = api.video.sync;
   // THE PICTURE CAN CHANGE SHAPE WITHOUT THE WINDOW MOVING.  A VP8 stream changes
   // resolution mid-flight now, because the desktop resizes itself to the window looking
@@ -887,7 +893,68 @@ export async function init(api) {
       paintQ();
     };
     buildRungs();
-    qPanel.append(qHead, qGrid, qNote); document.body.appendChild(qPanel);
+    // ---- SHARP OR FUZZY: the desktop as glass's own pixels (RFB) or as the VP8 stream ----------
+    // Only on a box that can do both (it reports "mode").  RFB is sharp and wants a decent link;
+    // video is soft and keeps moving on a bad one -- the rungs below are video's.  The box says
+    // which it is doing; the buttons ask, and follow the answer, as the rungs do.
+    const MODE_KEY = 'glass.deskMode';
+    const qModes = document.createElement('div');
+    qModes.style.cssText = 'display:none;gap:4px';
+    const modeBtns = new Map();
+    for (const [mode, label] of [['rfb', 'sharp · rfb'], ['video', 'fuzzy · video']]) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'pointer-events:auto;touch-action:manipulation;flex:1;padding:7px 2px;' +
+        'border-radius:7px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);' +
+        'color:#8a949c;font:11px ui-monospace,monospace';
+      b.addEventListener('click', e => {
+        e.stopPropagation();
+        try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+        sendMode(mode);
+      });
+      modeBtns.set(mode, b); qModes.appendChild(b);
+    }
+    const paintModes = () => {
+      qModes.style.display = window.__deskMode ? 'flex' : 'none';
+      for (const [mode, b] of modeBtns) {
+        const on = mode === window.__deskMode;
+        b.style.color = on ? '#7CFC9B' : '#8a949c';
+        b.style.background = on ? 'rgba(124,252,155,.16)' : 'rgba(255,255,255,.06)';
+        b.style.borderColor = on ? '#7CFC9B' : 'rgba(255,255,255,.18)';
+      }
+    };
+    const sendMode = mode => {
+      if (ctrl.readyState !== 'open') { qNote.textContent = 'control channel ' + ctrl.readyState; return; }
+      ctrl.send(JSON.stringify({ mode }));
+      diag('desktop mode -> ' + mode);
+    };
+    // The box reports its mode in every status.  A CHANGE is acted on here, from the box's word,
+    // not from the tap: the RFB frame requests below must reach the gateway AFTER it has stopped
+    // swallowing them, and the status is the proof that it has.
+    let modeAsked = false;
+    const noteMode = m => {
+      if (!m || !m.mode) return;
+      // this page's remembered choice, said once per control channel if the box disagrees
+      if (!modeAsked) {
+        modeAsked = true;
+        let want = null; try { want = localStorage.getItem(MODE_KEY); } catch (_) {}
+        if ((want === 'rfb' || want === 'video') && want !== m.mode) sendMode(want);
+      }
+      if (m.mode === window.__deskMode) return;
+      const was = window.__deskMode; window.__deskMode = m.mode;
+      diag(`desktop is ${m.mode === 'rfb' ? 'RFB (sharp)' : 'VIDEO (fuzzy)'}${was ? ' — was ' + was : ''}`);
+      paintModes();
+      if (window.__applyDeskVideo) window.__applyDeskVideo();
+      if (m.mode === 'rfb' && typeof rfb !== 'undefined' && rfb && rfb._sock) {
+        // a whole frame now, and a second request in flight, as on connect
+        try {
+          RFB.messages.fbUpdateRequest(rfb._sock, false, 0, 0, rfb._fbWidth, rfb._fbHeight);
+          RFB.messages.fbUpdateRequest(rfb._sock, true, 0, 0, rfb._fbWidth, rfb._fbHeight);
+        } catch (err) { diag('rfb frame request: ' + err); }
+      }
+    };
+    onOpen(ctrl, () => { modeAsked = false; });
+    qPanel.append(qModes, qHead, qGrid, qNote); document.body.appendChild(qPanel);
     // the box answers every message with the state it is ACTUALLY in, so the highlight follows the
     // encoder rather than the tap
     // COMING BACK FROM THE BACKGROUND is the SHELL's, and deliberately so.  It has to be: an iOS
@@ -910,6 +977,7 @@ export async function init(api) {
       // phone already polls, so the answer to "is the desktop the shape of this window" can be
       // asked repeatedly and answered from current facts rather than remembered events.
       if (m && m.desktop_w > 0 && m.desktop_h > 0) reconcileDesktop(m.desktop_w, m.desktop_h);
+      noteMode(m);
       if (!m || m.kbps == null) return;
       if (Array.isArray(m.rungs) && m.rungs.join() !== QRUNGS.join()) { QRUNGS = m.rungs; buildRungs(); }
       qCurrent = m.kbps; qPending = null; paintQ();
@@ -1937,10 +2005,19 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
       ctrl.send(JSON.stringify({ video: videoWant ? 1 : 0 }));
       diag('desktop video ' + (videoWant ? 'resumed' : 'paused — full-screen app'));
     };
-    const showDesktopVideo = on => {
+    // SHOWN = the desktop is uncovered (no full-screen app) AND it is going out as video.  In RFB
+    // mode the video is hidden and paused, and noVNC's canvas beneath it is the picture.
+    let desktopUncovered = true;
+    const applyDeskVideo = () => {
+      const on = desktopUncovered && window.__deskMode !== 'rfb';
       videoWant = on;
       vidEl.style.visibility = on ? '' : 'hidden';
       pushVideoState();
+    };
+    window.__applyDeskVideo = applyDeskVideo;
+    const showDesktopVideo = on => {
+      desktopUncovered = on;
+      applyDeskVideo();
       // The box forces a keyframe when it resumes, so there is nothing to ask for here; it also
       // means the picture comes back whole rather than as a slow repair of a stale reference.
     };
@@ -3106,7 +3183,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
           // canvas was most likely to be stale.  Measured: rotating once healed (the resize
           // itself made frames), rotating back did not, and the canvas kept the old aspect for
           // good.  Same throttle, its own gate.
-          if (videoPrimary && shapeWrong() && now - lastHeal > 3000) {
+          if (videoLive() && shapeWrong() && now - lastHeal > 3000) {
               lastHeal = now;
               const c = document.querySelector('#screen canvas');
               diag(`SHAPE: video ${vidEl.videoWidth}x${vidEl.videoHeight} does not match the ` +
@@ -3133,7 +3210,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
               }
               syncVideo(); api.video.nudge();
           }
-          if (videoPrimary && moving && now - lastHeal > 3000) {
+          if (videoLive() && moving && now - lastHeal > 3000) {
             if (vidEl.paused) {
               lastHeal = now;
               diag(`PAUSED with ${vidKbs.toFixed(1)} KB/s arriving — play()`);
@@ -3155,7 +3232,7 @@ if (typeof window !== "undefined") window.makeWarpClient = makeWarpClient;
           // resync is minutes away at the low rungs by design.  Ask, but only when nothing is
           // already on its way: a keyframe takes 35 s to arrive at 5 kbps, and re-asking while it
           // is still in flight would restart it forever.
-          if (videoPrimary && ctrl.readyState === 'open' && !(v.framesDecoded > 0) &&
+          if (videoLive() && ctrl.readyState === 'open' && !(v.framesDecoded > 0) &&
               (v.bytesReceived || 0) === prevB && now - tStart > 6000 &&
               now - lastKeyAsk > 20000) {
             lastKeyAsk = now;
