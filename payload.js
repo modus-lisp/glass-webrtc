@@ -669,7 +669,18 @@ export async function init(api) {
     rfb.focusOnClick = true;
     rfb.showDotCursor = true;      // desktop: draw a dot when the remote cursor is empty, so a
                                    // mouse user is never left with no pointer at all
-    rfb.addEventListener('connect', () => { log('RFB connected'); rfb.focus(); });
+    rfb.addEventListener('connect', () => {
+      log('RFB connected'); rfb.focus();
+      // TWO UPDATE REQUESTS IN FLIGHT, NOT ONE.  noVNC asks for the next update when one
+      // arrives, so with a single request the desktop answers once per round trip and then waits
+      // for the next ask: a drag at 100 ms RTT got ~5 updates/s, each a big jump.  One extra
+      // request, sent once here, keeps circulating -- noVNC replaces each one it is answered
+      // for -- so a frame is always owed and the next change goes out as soon as it is drawn.
+      // glass counts them (rfb.lisp, RC-CREDIT); a server that keeps one slot just absorbs it.
+      try {
+        RFB.messages.fbUpdateRequest(rfb._sock, true, 0, 0, rfb._fbWidth, rfb._fbHeight);
+      } catch (e) { log('second update request: ' + e); }
+    });
     rfb.addEventListener('disconnect', e => log('RFB disconnect', e.detail));
 
     // ---- keep the desktop the shape of the window -------------------------------------------

@@ -288,6 +288,17 @@ PIXEL = """async ([X, Y, since, limit]) => {
 VFRAMES = """() => { const v = [...document.querySelectorAll('video')].find(v => v.videoWidth > 64);
   return v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : null; }"""
 
+# Complete RFB FramebufferUpdates noVNC has applied: its _framebufferUpdate returns true when the
+# last rect of one is in.  "upd/s" counts data-channel arrivals instead, and one big update split
+# across several of them counts several times -- this is the count of updates as such.
+FBU = """() => { const r = window.__rfb; if (!r) return null;
+  if (!r.__fbuHooked) { const f = r._framebufferUpdate.bind(r); window.__fbu = 0;
+    r._framebufferUpdate = () => { const done = f(); if (done) window.__fbu++; return done; };
+    const q = r._requestRemoteResize; window.__rsz = 0;
+    if (typeof q === 'function') r._requestRemoteResize = (...a) => { window.__rsz++; return q.apply(r, a); };
+    r.__fbuHooked = true; }
+  return window.__fbu; }"""
+
 def measure(p, grab):
     x, y, left = grab
     rx = lambda: p.evaluate("window.__rx.length")
@@ -316,7 +327,8 @@ def measure(p, grab):
             wall = (p.evaluate("performance.timeOrigin") + t_in) / 1000 if t_in else 0
             print(f"     step {i}: at {wall:.3f} seen {t_seen and round(t_seen - (t_in or 0))}  rx {rxs}", flush=True)
         quiet()
-    k0 = rx(); t0 = p.evaluate("performance.now()"); f0 = p.evaluate(VFRAMES)
+    p.evaluate(FBU)                                  # hook before counting from zero
+    k0 = rx(); t0 = p.evaluate("performance.now()"); f0 = p.evaluate(VFRAMES); u0 = p.evaluate(FBU)
     end = time.time() + 5; step = 0
     while time.time() < end:            # out 150 px and back, over and over: ends where it began
         step += 1
@@ -327,7 +339,7 @@ def measure(p, grab):
     time.sleep(0.6)
     t1 = p.evaluate("performance.now()")
     msgs = p.evaluate(f"window.__rx.slice({k0})")
-    f1 = p.evaluate(VFRAMES)
+    f1 = p.evaluate(VFRAMES); u1 = p.evaluate(FBU); rsz = p.evaluate("window.__rsz")
     p.mouse.up()
     ups, last = 0, -1e9
     for t, n, lab in msgs:
@@ -340,7 +352,11 @@ def measure(p, grab):
     return dict(video=video,lat_n=len(lat),
                 lat_med=statistics.median(lat) if lat else None,
                 lat_p90=sorted(lat)[max(0, int(len(lat) * 0.9) - 1)] if lat else None,
-                ups=ups / secs, kbs=sum(m[1] for m in msgs) / secs / 1024)
+                ups=ups / secs, kbs=sum(m[1] for m in msgs) / secs / 1024,
+                resize_asks=rsz,
+                fbu=(u1 - u0) / secs if u0 is not None and u1 is not None else None,
+                kb_per_fbu=(sum(m[1] for m in msgs) / 1024 / (u1 - u0)
+                            if u0 is not None and u1 is not None and u1 > u0 else None))
 
 # ---- the card -------------------------------------------------------------------------------------
 card_dir = OUT / "card"; card_dir.mkdir(exist_ok=True)
@@ -480,11 +496,12 @@ finally:
     turn.terminate()
     (OUT / "results.json").write_text(json.dumps(dict(impl=IMPL, results=results), indent=1))
 
-print(f"\n{'scenario':<8} {'desktop':>8} {'answer':>8} {'median':>8} {'p90':>8} {'upd/s':>7} {'KB/s':>6}")
+print(f"\n{'scenario':<8} {'desktop':>8} {'answer':>8} {'median':>8} {'p90':>8} {'upd/s':>7} {'KB/s':>6} {'fbu/s':>6} {'KB/fbu':>7}")
 for name, r in results.items():
     f = lambda v, fmt: (fmt % v) if v is not None else "-"
     print(f"{name:<8} {f(r.get('ttd'), '%6.1f s'):>8} {f(r.get('answer'), '%6.1f s'):>8} {f(r.get('lat_med'), '%5.0f ms'):>8} "
           f"{f(r.get('lat_p90'), '%5.0f ms'):>8} {f(r.get('ups'), '%5.1f'):>7} {f(r.get('kbs'), '%4.0f'):>6}"
+          f" {f(r.get('fbu'), '%5.1f'):>6} {f(r.get('kb_per_fbu'), '%6.1f'):>7}  resize asks {r.get('resize_asks')}"
           f"{'  video' if r.get('video') else ''}")
 print(f"\nLINKCOND {IMPL}: {'PASS' if not fails else 'FAIL (' + str(len(fails)) + ')'}", flush=True)
 sys.exit(1 if fails else 0)
