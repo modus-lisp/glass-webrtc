@@ -20,7 +20,12 @@
   ;; starts nothing and listens on nothing — see gateway-nostr.lisp, which loads it for the
   ;; audio, microphone and admission halves as well.
   (asdf:load-system "glass")
-  (ql:quickload '(:hunchentoot) :silent t))
+  ;; Quicklisp when it is loaded; otherwise the systems are already on ASDF's search path -- a
+  ;; card (hosted-card/card-gateway.lisp) puts Quicklisp's software tree there and loads no
+  ;; Quicklisp, and the reader cannot even see QL:QUICKLOAD in a file meant to load there.
+  (if (find-package "QL")
+      (funcall (find-symbol "QUICKLOAD" "QL") '(:hunchentoot) :silent t)
+      (asdf:load-system "hunchentoot")))
 
 (in-package #:webrtc-data)
 

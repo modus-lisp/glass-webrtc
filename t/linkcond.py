@@ -299,6 +299,21 @@ FBU = """() => { const r = window.__rfb; if (!r) return null;
     r.__fbuHooked = true; }
   return window.__fbu; }"""
 
+# THE DESKTOP'S SIZE AND THE WINDOW'S: [desktop w, h, #screen w, h], or None.  The desktop follows
+# the window (SetDesktopSize); until it has, a title bar found on the screen is where it WAS.
+SIZE = ("() => { const r = window.__rfb, s = document.getElementById('screen');"
+        " const b = s && s.getBoundingClientRect();"
+        " return r && b ? [r._fbWidth, r._fbHeight, Math.round(b.width), Math.round(b.height)] : null; }")
+
+def follows(p, wait):
+    """Wait up to WAIT s for the desktop to be the window's size: (settled, [dw, dh, ww, wh])."""
+    t1 = time.time(); v = None
+    while time.time() - t1 < wait:
+        v = p.evaluate(SIZE)
+        if v and abs(v[0] - v[2]) <= 8 and abs(v[1] - v[3]) <= 8: return True, v
+        time.sleep(0.25)
+    return False, v
+
 def measure(p, grab):
     x, y, left = grab
     rx = lambda: p.evaluate("window.__rx.length")
@@ -458,6 +473,12 @@ try:
                f"{colours}% workspace")
             if painted:
                 ok(f"{name}: time to desktop <= {th['ttd']} s", r["ttd"] <= th["ttd"], f"{r['ttd']:.1f} s")
+                # A VIDEO desktop is painted before the resize lands (its first frames are the old
+                # size, scaled): drag where the title bar is once the desktop has its size.
+                if follows(p, 8)[0]:
+                    time.sleep(0.5)
+                    p.screenshot(path=str(OUT / f"{name}.png"))
+                    grab = title_bar(OUT / f"{name}.png")[0] or grab
                 m = measure(p, grab); r.update(m)
                 p.screenshot(path=str(OUT / f"{name}-after.png"))
                 ok(f"{name}: drag steps answered", m["lat_n"] >= 12, f"{m['lat_n']}/16")
@@ -470,21 +491,11 @@ try:
                     # THE DESKTOP IS THE SHAPE OF THE WINDOW LOOKING AT IT: the card starts at
                     # 640x480, noVNC asks (SetDesktopSize) for the size of #screen, and glass's WM
                     # resizes.  Then a phone-shaped window, and the desktop follows that too.
-                    size = ("() => { const r = window.__rfb, s = document.getElementById('screen');"
-                            " const b = s && s.getBoundingClientRect();"
-                            " return r && b ? [r._fbWidth, r._fbHeight, Math.round(b.width), Math.round(b.height)] : null; }")
-                    def follows(wait):
-                        t1 = time.time(); v = None
-                        while time.time() - t1 < wait:
-                            v = p.evaluate(size)
-                            if v and abs(v[0] - v[2]) <= 8 and abs(v[1] - v[3]) <= 8: return True, v
-                            time.sleep(0.25)
-                        return False, v
-                    good, v = follows(8)
+                    good, v = follows(p, 8)
                     ok(f"{name}: the desktop became the window's size (SetDesktopSize)", good,
                        v and f"desktop {v[0]}x{v[1]}, window {v[2]}x{v[3]}")
                     p.set_viewport_size({"width": 390, "height": 700})
-                    good, v = follows(10)
+                    good, v = follows(p, 10)
                     ok(f"{name}: ...and followed a phone-shaped window", good,
                        v and f"desktop {v[0]}x{v[1]}, window {v[2]}x{v[3]}")
                     p.screenshot(path=str(OUT / f"{name}-phone.png"))

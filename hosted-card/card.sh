@@ -17,6 +17,8 @@
 #   CARD_DESK    lean: glass's lean desk instead of the window manager
 #   CARD_ONE_PROCESS=1  ONE Lisp, IMPL: the gateway is the desktop too (the window manager; not
 #                with CARD_DESK=lean), so no separate desktop is started and DESK_IMPL is unused
+#   CARD_VIDEO=1 the desktop as a VP8 stream on a bandwidth ladder the phone picks from (the full
+#                gateway; SBCL) -- see card-gateway.lisp
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
 #   CARD_LOGIN_TTL, CARD_ONE_THREAD, CARD_TRACE, CARD_ADMDIAG, CARD_TS, CARD_SYMDUMP -- see
 #   card-gateway.lisp
@@ -62,6 +64,7 @@ T0=$(date +%s)
     export NOSTR_SEC=$(od -An -N32 -tx1 /dev/urandom | tr -d " \n")
   fi && export GLASS_NOSTR_SEC=$NOSTR_SEC
   export GLASS_NOSTR_ALLOW=$OWNER GLASS_HOST=127.0.0.1 GLASS_PORT=$DPORT
+  [ "${CARD_VIDEO:-}" = 1 ] && export VIDEO_PRIMARY=1
   export GLASS_ADMISSION_HOST=127.0.0.1 GLASS_ADMISSION_PORT=$((DPORT+1)) CARD_STORE=$STORE MODUS_ROOT
   export NOSTR_RELAYS=${NOSTR_RELAYS:-wss://relay.snort.social,wss://nostr.oxtr.dev,wss://relay.primal.net}
   export PAYLOAD_CHANNEL=1 PAYLOAD_FILE=${PAYLOAD_FILE:-$HERE/../payload.js}

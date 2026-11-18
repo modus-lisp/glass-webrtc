@@ -7,6 +7,12 @@
 ;;;;   NOSTR_SEC (64 hex), GLASS_NOSTR_ALLOW (owner npub), GLASS_LOGIN_URL_BASE, NOSTR_RELAYS
 ;;;;   TURN_SERVER_URL / TURN_USER / TURN_PASS, GLASS_PORT, GLASS_ADMISSION_PORT, PAYLOAD_FILE
 ;;;;   CARD_STORE          a directory for glass's stores (devices, seats, stats)
+;;;; The desktop as VIDEO (card.sh exports VIDEO_PRIMARY=1 with it):
+;;;;   CARD_VIDEO=1        load the full gateway (glass-webrtc/nostr, with webrtc-media's VP8
+;;;;                       encoder) instead of the lean one, and send the desktop as a VP8 stream on
+;;;;                       the bandwidth ladder (video-profiles.lisp: 5 .. 4800 kbps, picked on the
+;;;;                       phone) -- the RFB channel then carries input only.  The low rungs are
+;;;;                       the extreme-bandwidth mode: a soft, blocky desktop that keeps moving.
 ;;;; Diagnostics, all optional:
 ;;;;   CARD_LOGIN_TTL=S    a DM'd login link stays good S seconds (glass's default is 10 minutes)
 ;;;;   CARD_ONE_THREAD=1   modus: no net-loop thread; the relay pump turns it, as on the card's core 0
@@ -26,7 +32,12 @@
 (defun env (n) (sb-ext:posix-getenv n))
 (let ((t0 (get-internal-real-time)))
   (asdf:load-system "glass/nostr")
-  (asdf:load-system "glass-webrtc/nostr-lean")
+  ;; the full gateway starts itself when loaded; this file configures admission and the desktop
+  ;; first and starts it at the end, as it does the lean one
+  (pushnew :glass-webrtc-no-autostart *features*)
+  (asdf:load-system (if (equal (sb-ext:posix-getenv "CARD_VIDEO") "1")
+                        "glass-webrtc/nostr"           ; + webrtc-media: the desktop as VP8 video
+                        "glass-webrtc/nostr-lean"))
   (when (equal (sb-ext:posix-getenv "CARD_ONE_PROCESS") "1") (asdf:load-system "glass/wm"))
   (format t "~&card-gateway: loaded in ~,1f s~%" (/ (- (get-internal-real-time) t0) internal-time-units-per-second))
   (finish-output))

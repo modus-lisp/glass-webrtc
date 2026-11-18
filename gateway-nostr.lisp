@@ -1473,5 +1473,7 @@ a box that is not listening yet, or is still unwrapping old wraps ahead of it.")
           (%outbox-drain)
           (when (> (get-universal-time) deadline) (%gateway-ready))))))
 
-;; The desktop gateway: loading this file is starting it (kiln, gw-keepalive.sh).
-(unless (%lean-p) (start-nostr-gateway))
+;; The desktop gateway: loading this file is starting it (kiln, gw-keepalive.sh) -- unless the
+;; launcher configures first and starts it itself (:GLASS-WEBRTC-NO-AUTOSTART; hosted-card's
+;; card-gateway.lisp with CARD_VIDEO), as the lean gateway always does.
+(unless (or (%lean-p) (member :glass-webrtc-no-autostart *features*)) (start-nostr-gateway))
