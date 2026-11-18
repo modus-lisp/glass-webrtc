@@ -38,7 +38,11 @@
   (asdf:load-system (if (equal (sb-ext:posix-getenv "CARD_VIDEO") "1")
                         "glass-webrtc/nostr"           ; + webrtc-media: the desktop as VP8 video
                         "glass-webrtc/nostr-lean"))
-  (when (equal (sb-ext:posix-getenv "CARD_ONE_PROCESS") "1") (asdf:load-system "glass/wm"))
+  (when (equal (sb-ext:posix-getenv "CARD_ONE_PROCESS") "1")
+    (asdf:load-system "glass/wm")
+    ;; the McCLIM desktop's apps CARD_APPS names (card-apps.lisp), here because the desktop is
+    (load (merge-pathnames "card-apps.lisp" *load-truename*))
+    (load-card-apps))
   (format t "~&card-gateway: loaded in ~,1f s~%" (/ (- (get-internal-real-time) t0) internal-time-units-per-second))
   (finish-output))
 ;; CARD_SYMDUMP=FILE (modus): every function's code address, for naming PCs in a core dump later
@@ -186,7 +190,9 @@
   ;; gateway still reaches the desktop over loopback RFB: threads that share no state talk
   ;; through a socket.
   (when (equal (env "CARD_ONE_PROCESS") "1")
-    (let ((listener (call "GLASS.WM" "START-WM" rport :width 640 :height 480)))
+    (let ((listener (apply #'call "GLASS.WM" "START-WM" rport :width 640 :height 480
+                           (card-wm-sound-args rport))))
+      (start-card-app-services rport)
       (format t "~&card-gateway: desktop on 127.0.0.1:~d (one process)~%" rport) (finish-output)
       #+modus
       (let* ((pump-sym (find-symbol "PUMP" "CL-NOSTR.RELAY"))

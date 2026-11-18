@@ -6,6 +6,9 @@
 (dolist (d (directory (format nil "~A/*/" *root*))) (push d asdf:*central-registry*))
 (let ((t0 (get-internal-real-time)))
   (asdf:load-system (if (equal (sb-ext:posix-getenv "CARD_DESK") "lean") :glass/desk-serve :glass/wm))
+  ;; the McCLIM desktop's apps CARD_APPS names (card-apps.lisp) -- the window manager's menu only
+  (load (merge-pathnames "card-apps.lisp" *load-truename*))
+  (unless (equal (sb-ext:posix-getenv "CARD_DESK") "lean") (load-card-apps))
   (format t "~&card-desk: loaded in ~,1f s~%"
           (/ (- (get-internal-real-time) t0) internal-time-units-per-second)))
 ;; CARD_SYMDUMP=FILE (modus): every function's code address, for naming PCs in a core dump later
@@ -27,5 +30,7 @@
   (finish-output)
   ;; CARD_DESK=lean: glass.desk:serve-desk, the lean desk; otherwise glass.wm:serve-wm
   (if (not (equal (sb-ext:posix-getenv "CARD_DESK") "lean"))
-      (funcall (find-symbol "SERVE-WM" "GLASS.WM") port :width 640 :height 480)
+      (progn (start-card-app-services port)
+             (apply (find-symbol "SERVE-WM" "GLASS.WM") port :width 640 :height 480
+                    (card-wm-sound-args port)))
       (funcall (find-symbol "SERVE-DESK" "GLASS.DESK") port :width 640 :height 480)))

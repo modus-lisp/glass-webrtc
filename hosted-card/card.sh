@@ -19,6 +19,8 @@
 #                with CARD_DESK=lean), so no separate desktop is started and DESK_IMPL is unused
 #   CARD_VIDEO=1 the desktop as a VP8 stream on a bandwidth ladder the phone picks from (the full
 #                gateway; SBCL) -- see card-gateway.lisp
+#   CARD_APPS=files,browser,podcasts,voice (or all) the McCLIM desktop's apps on the window
+#                manager's menu, with GLASS_VOICE / GLASS_EARS for the voice -- see card-apps.lisp
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
 #   CARD_LOGIN_TTL, CARD_ONE_THREAD, CARD_TRACE, CARD_ADMDIAG, CARD_TS, CARD_SYMDUMP -- see
 #   card-gateway.lisp
