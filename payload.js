@@ -42,6 +42,12 @@ import { mountChat } from '../operandi-gui/client/chat.js';
 import RFB from './novnc/core/rfb.js';
 
 export const needs = 1;
+// Desk pixels asked for per CSS pixel when the desktop is resized to fit (see the size request in
+// init).  1 while the desk draws at 1x: a denser desktop would be sharp and its text unreadable.
+const DESK_DENSITY_MAX = 1;
+function deskDensity() {
+  return Math.max(1, Math.min(DESK_DENSITY_MAX, Math.round(window.devicePixelRatio || 1)));
+}
 
 export async function init(api) {
   // The shell's members, bound to the names the code below has always used.  This is deliberately a
@@ -615,7 +621,13 @@ export async function init(api) {
     //
     // Capped, because this squares: 4x the pixels is 4x the macroblocks to encode and
     // send, and a phone on a slow link would rather have a sharp 2x than a stalled 3x.
-    const dpr = Math.max(1, Math.min(2, Math.round(window.devicePixelRatio || 1)));
+    //
+    // AND OFF FOR NOW (DESK_DENSITY_MAX 1): the desktop that answers resizes today is glass's
+    // WM, which draws its windows' contents -- every font -- at 1x.  Asked for 2x CSS pixels it
+    // made a desktop twice the size with text half the size: sharp and unreadable.  Asking for
+    // CSS pixels makes the desktop the shape AND the size of the screen.  Raise it when the desk
+    // draws at density.  RECONCILE-DESKTOP below compares against the same factor.
+    const dpr = deskDensity();
     if (dpr > 1 && typeof rfb._requestRemoteResize === 'function'
         && typeof rfb._screenSize === 'function') {
       const trueSize = rfb._screenSize.bind(rfb);
@@ -673,7 +685,7 @@ export async function init(api) {
       if (!want || !want.w || !want.h) return;
       // the same CSS x DPR the request itself uses -- compare what we would ASK for, not the
       // CSS size, or the two never agree on a retina phone and this asks forever
-      const dpr = Math.max(1, Math.min(2, Math.round(window.devicePixelRatio || 1)));
+      const dpr = deskDensity();
       const ww = Math.round(want.w * dpr), wh = Math.round(want.h * dpr);
       if (Math.abs(ww - dw) <= 8 && Math.abs(wh - dh) <= 8) { askedSize = ''; return; }
       const key = ww + 'x' + wh, now = performance.now();

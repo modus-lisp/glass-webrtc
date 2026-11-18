@@ -228,11 +228,19 @@ def ice(servers, relay_only):
 
 def title_bar(png):
     """(x, y, left) inside the topmost window title bar on the screenshot, or None: the first run
-    of light-grey rows at least 150 px wide, LEFT where that run begins.  Also how many colours
-    the desktop area shows."""
+    of light-grey rows at least 150 px wide, LEFT where that run begins.  Also the share of the
+    screen's middle that is the WM's teal workspace (61,122,138; ~57,123,140 once through a codec).
+
+    It used to count colours (>= 1000 = painted, against grey RFB tiles' few hundred), which only
+    held while a 640x480 desktop was SCALED to the window: the scaling's blend made the colours.
+    Once the desktop is resized to the window it is shown 1:1, a painted one has ~150 colours, and
+    a desktop with only its old corner painted had as many as a whole one.  Teal coverage tells
+    them apart: whole ~85%, a 640x480 corner of 1280x720 ~34%, grey tiles ~0."""
     from PIL import Image
     im = Image.open(png).convert("RGB"); w, h = im.size; px = im.load()
-    colours = len(set(im.crop((w // 8, h // 8, w * 7 // 8, h * 7 // 8)).getdata()))
+    mid = list(im.crop((w // 8, h // 8, w * 7 // 8, h * 7 // 8)).getdata())
+    colours = round(100 * sum(1 for r, g, b in mid
+                              if abs(r - 59) <= 14 and abs(g - 122) <= 14 and abs(b - 139) <= 14) / len(mid))
     for y in range(20, h // 2):
         run, best, start = 0, (0, 0), 0
         for x in range(w):
@@ -407,9 +415,9 @@ try:
                 if running:
                     p.screenshot(path=str(OUT / f"{name}.png"))
                     grab, colours = title_bar(OUT / f"{name}.png")
-                    # A title bar on a screen of a few hundred colours is grey RFB tiles, not a
-                    # desktop: a painted one (wallpaper, text, chrome) is in the thousands.
-                    if grab and colours >= 1000:
+                    # A title bar on a screen that is not mostly workspace is grey RFB tiles, or
+                    # a desktop only partly painted -- see TITLE_BAR.
+                    if grab and colours >= 50:
                         painted = True; break
                 time.sleep(0.5)
             r["ttd"] = time.time() - t0 if painted else None
@@ -422,12 +430,16 @@ try:
             r["answer"] = ((sig["answer"] - sig["out"]) / 1000
                            if sig.get("answer") is not None and sig.get("out") is not None else None)
             if not painted:      # the client's own account of how far it got
-                (OUT / f"{name}-diag.txt").write_text(d)
+                fbsz = p.evaluate("() => { const r = window.__rfb, s = document.getElementById('screen'),"
+                                  " c = s && s.querySelector('canvas'); return JSON.stringify({fb: r && [r._fbWidth, r._fbHeight],"
+                                  " screen: s && [s.clientWidth, s.clientHeight], canvas: c && [c.width, c.height, c.style.width, c.style.height],"
+                                  " scale: r && r.scaleViewport, resize: r && r.resizeSession}); }")
+                (OUT / f"{name}-diag.txt").write_text(d + "\nsizes " + fbsz + "\n")
                 p.screenshot(path=str(OUT / f"{name}-failed.png"))
             r["colours"] = colours
             ok(f"{name}: the client runs", running)
             ok(f"{name}: the desktop is painted (a window's title bar is on the screen)", painted,
-               f"{colours} colours")
+               f"{colours}% workspace")
             if painted:
                 ok(f"{name}: time to desktop <= {th['ttd']} s", r["ttd"] <= th["ttd"], f"{r['ttd']:.1f} s")
                 m = measure(p, grab); r.update(m)
@@ -438,6 +450,28 @@ try:
                    f"{m['lat_med']:.0f} ms (p90 {m['lat_p90']:.0f})" if m["lat_med"] is not None else "none")
                 ok(f"{name}: >= {th['ups']} updates/s while dragging", m["ups"] >= th["ups"],
                    f"{m['ups']:.1f}/s, {m['kbs']:.0f} KB/s")
+                if name == SCENARIOS[0][0]:
+                    # THE DESKTOP IS THE SHAPE OF THE WINDOW LOOKING AT IT: the card starts at
+                    # 640x480, noVNC asks (SetDesktopSize) for the size of #screen, and glass's WM
+                    # resizes.  Then a phone-shaped window, and the desktop follows that too.
+                    size = ("() => { const r = window.__rfb, s = document.getElementById('screen');"
+                            " const b = s && s.getBoundingClientRect();"
+                            " return r && b ? [r._fbWidth, r._fbHeight, Math.round(b.width), Math.round(b.height)] : null; }")
+                    def follows(wait):
+                        t1 = time.time(); v = None
+                        while time.time() - t1 < wait:
+                            v = p.evaluate(size)
+                            if v and abs(v[0] - v[2]) <= 8 and abs(v[1] - v[3]) <= 8: return True, v
+                            time.sleep(0.25)
+                        return False, v
+                    good, v = follows(8)
+                    ok(f"{name}: the desktop became the window's size (SetDesktopSize)", good,
+                       v and f"desktop {v[0]}x{v[1]}, window {v[2]}x{v[3]}")
+                    p.set_viewport_size({"width": 390, "height": 700})
+                    good, v = follows(10)
+                    ok(f"{name}: ...and followed a phone-shaped window", good,
+                       v and f"desktop {v[0]}x{v[1]}, window {v[2]}x{v[3]}")
+                    p.screenshot(path=str(OUT / f"{name}-phone.png"))
             results[name] = r
             ctx.close()
         browser.close()
