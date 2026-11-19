@@ -53,3 +53,12 @@ of a POST, so a browser reaches the desktop without a reachable address."
                (:file "payload-channel")
                (:file "pointer-channel")
                (:file "gateway-nostr")))
+
+;;; The OTHER end: dial a box the way the phone does (shell.js) -- a login code or the device
+;;; key it enrolled, a gift-wrapped non-trickle offer over the relays, the answer by its ufrag,
+;;; and the desktop's RFB as a byte stream over webrtc-data's calling side.  No glass, no
+;;; gateway: a client library, for glass's Remote window and for tests.
+(asdf:defsystem "glass-webrtc/dial"
+  :description "Dial a glass box over Nostr + WebRTC, as the phone does; RFB as a byte stream."
+  :depends-on ("webrtc-data" "cl-nostr" "json-simple" "sb-posix")
+  :components ((:file "dial")))
