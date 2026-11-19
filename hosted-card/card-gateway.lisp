@@ -226,6 +226,7 @@
         (setf (symbol-function pump-sym)
               (lambda (&optional (timeout 0))
                 (funcall turn listener)
+                (control-turn)                    ; the control socket's forms, likewise
                 (funcall orig timeout))))
       #-modus
       (sb-thread:make-thread (lambda () (call "GLASS-REPL" "RUN-LISTENER" listener))

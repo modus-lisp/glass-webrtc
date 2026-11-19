@@ -33,8 +33,8 @@
 ;; hand-loaded siblings.  They used to be (load (merge-pathnames ... *load-pathname*)),
 ;; which works when this file is LOADed as source and breaks the moment it is
 ;; COMPILE-FILEd: under ASDF *load-pathname* is the output cache, so the sibling is
-;; looked for in .cache/... and is not there.  video-profiles is already a component of
-;; the parent "glass-webrtc" system; glass-capture is now one of this system's.
+;; looked for in .cache/... and is not there.  video-profiles is a component of
+;; "glass-webrtc/media"; glass-capture is one of this system's.
 
 (in-package #:webrtc-data)
 

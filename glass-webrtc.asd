@@ -19,11 +19,19 @@ machine's home directory."
   ;; anything that wants to know what this depends on.
   ;; webrtc-media for the VP8 encoder the video ladder drives — an undeclared
   ;; dependency until now, because a subdirectory loaded by path declares nothing.
-  :depends-on ("webrtc-data" "webrtc-media" "glass" "hunchentoot")
+  :depends-on ("glass-webrtc/media" "hunchentoot")
+  :serial t
+  :components ((:file "gateway")))
+
+;;; The media half both gateways share: the audio/video hooks and the VP8 ladder, without the HTTP
+;;; server.  Split out so the nostr gateway does not pull in hunchentoot -> cl+ssl -> CFFI, which
+;;; modus does not have: the nostr gateway never served HTTP, it only loaded the system that does.
+(asdf:defsystem "glass-webrtc/media"
+  :description "The gateways' media half: audio/video hooks and the VP8 bandwidth ladder."
+  :depends-on ("webrtc-data" "webrtc-media" "glass")
   :serial t
   :components ((:file "media-hooks")
-               (:file "video-profiles")
-               (:file "gateway")))
+               (:file "video-profiles")))
 
 ;;; The nostr-signalled half: the same gateway reached over relays instead of a local
 ;;; port.  Separate because it pulls in glass/nostr and cl-nostr, and a LAN gateway
@@ -31,7 +39,7 @@ machine's home directory."
 (asdf:defsystem "glass-webrtc/nostr"
   :description "The gateway, signalled over nostr: gift-wrapped SDP over relays instead
 of a POST, so a browser reaches the desktop without a reachable address."
-  :depends-on ("glass-webrtc" "glass/nostr" "cl-nostr" "json-simple" "cram")   ; cram: the payload's gzip
+  :depends-on ("glass-webrtc/media" "glass/nostr" "cl-nostr" "json-simple" "cram")   ; cram: the payload's gzip
   :serial t
   :components ((:file "glass-capture")
                (:file "gateway-nostr")))
