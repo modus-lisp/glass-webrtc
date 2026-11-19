@@ -21,6 +21,15 @@
 #                gateway; SBCL) -- see card-gateway.lisp
 #   CARD_CONTROL=1 evaluate Lisp in the running card: a UNIX socket at $CARD_DIR/TAG.control, 0600,
 #                this uid only -- `hosted-card/card-eval $CARD_DIR/TAG.control '(+ 1 2)'` (one process)
+#   CARD_SITE=1  the card publishes its own client page (glass/site, as the McCLIM desktop did):
+#                its links name what it last published (~/.glass/site-url outranks LOGIN_URL_BASE),
+#                and with CARD_CONTROL=1 (one process) it publishes on request --
+#                `SITE_VERSION=k52 CARD_DIR=$CARD_DIR CARD_TAG=TAG sbcl --script ../publish.lisp PAGE`
+#                or card-eval ... '(glass:publish-site-file "/abs/nsite-index.html" :version "k52")'.
+#                The site key is ~/.glass/site-key (or GLASS_SITE_KEY=file), read per publish into
+#                gossamer memory and wiped after; GLASS_SITE_SEC / SITE_SEC are NOT passed to the card
+#                (a variable lives as long as the process and every terminal's shell inherits it).
+#                Off by default: the gateway and the desktop are one internet-facing process here.
 #   CARD_APPS=files,browser,podcasts,voice (or all) the McCLIM desktop's apps on the window
 #                manager's menu, with GLASS_VOICE / GLASS_EARS for the voice -- see card-apps.lisp
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
@@ -57,6 +66,8 @@ fi
 STORE=$CARD_DIR/store-$TAG; rm -rf "$STORE"; mkdir -p "$STORE"; chmod 700 "$STORE"
 T0=$(date +%s)
 ( set +x; source "$CARD_CONFIG"
+  # the site key goes to the card by FILE only (card-site.lisp): never as an environment variable
+  unset GLASS_SITE_SEC SITE_SEC
   read -r srv user pass <<< "$TURN_ICE"
   export TURN_ICE TURN_SERVER=${srv#turn:} TURN_SERVER_URL=$srv TURN_USER=$user TURN_PASS=$pass
   # a fresh box identity per run

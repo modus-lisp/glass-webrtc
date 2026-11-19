@@ -5,6 +5,7 @@
 ;;;; publish.lisp — hand the built page to the box, and let the box publish it.
 ;;;;
 ;;;;   SITE_VERSION=k43 sbcl --script publish.lisp [/path/to/nsite-index.html]
+;;;;   SITE_VERSION=k43 CARD_DIR=... CARD_TAG=TAG sbcl --script publish.lisp [...]     # a hosted card
 ;;;;
 ;;;; THIS FILE USED TO BE THE PUBLISHER.  It is not any more, and the reason is a bug it caused.
 ;;;;
@@ -40,10 +41,21 @@
 ;;;; successful publish by the wrong process is precisely the bug: the site would move and the
 ;;;; running box would go on minting links to what used to be there.
 ;;;;
-;;;; THE SITE KEY IS NOT IN THIS FILE and never was.  It is resolved by GLASS:SITE-SECRET at the
-;;;; moment of publishing, from $SITE_SEC or ~/.glass/site-key (0600), in whichever image does the
-;;;; work; there is no fallback and no committed placeholder, which is what lets this file live in
-;;;; a repository at all.
+;;;; THE SITE KEY IS NOT IN THIS FILE and never was.  It is read by GLASS:WITH-SITE-SECRET at the
+;;;; moment of publishing, from ~/.glass/site-key (0600) or $GLASS_SITE_SEC / $SITE_SEC, straight
+;;;; into gossamer memory, in whichever image does the work, and wiped when the publish returns;
+;;;; there is no fallback and no committed placeholder, which is what lets this file live in a
+;;;; repository at all.
+;;;;
+;;;; A HOSTED CARD (glass-webrtc/hosted-card) is the other box that mints links.  CARD_DIR + CARD_TAG
+;;;; (or CARD_CONTROL_PATH) name its control socket, $CARD_DIR/TAG.control, which exists when the
+;;;; card was started with CARD_ONE_PROCESS=1 CARD_CONTROL=1; it publishes only if it was also
+;;;; started with CARD_SITE=1 (hosted-card/card-site.lisp).  Two differences from the desktop:
+;;;;   - its socket is a little REPL that answers each form with a "--" line and waits for the next,
+;;;;     so this half-closes after sending, and the card answers and hangs up;
+;;;;   - a card need not HAVE a control socket, so "nobody answered" does not mean "nobody is
+;;;;     running".  If $CARD_DIR/TAG.pids names a live process, this refuses to publish locally —
+;;;;     the running card would go on minting links to what used to be there.
 
 (defun %trim (s) (string-trim '(#\Space #\Tab #\Newline #\Return) (or s "")))
 (defun %env (name) (let ((v (%trim (sb-posix:getenv name)))) (and (plusp (length v)) v)))
@@ -64,8 +76,15 @@
 ;; The desktop's control socket.  GLASS_CONTROL overrides; otherwise it is derived exactly the way
 ;; the launcher derives it, from the seat's wire — see GLASS:SOCKET-SIBLING, which exists so that
 ;; the two ends of this cannot be typed in twice and drift.
+(defparameter *card-control*
+  (or (%env "CARD_CONTROL_PATH")
+      (and (%env "CARD_DIR") (%env "CARD_TAG")
+           (format nil "~a/~a.control" (string-right-trim "/" (%env "CARD_DIR")) (%env "CARD_TAG"))))
+  "A hosted card's control socket, when the caller named a card; NIL means the McCLIM desktop.")
+
 (defparameter *control*
-  (or (%env "GLASS_CONTROL")
+  (or *card-control*
+      (%env "GLASS_CONTROL")
       (glass:socket-sibling (glass:socket-path "seat-0.rfb") "control")))
 
 ;; Long, because a publish uploads to three Blossom servers and waits for five relays to answer.
@@ -97,12 +116,18 @@ only the first one is this function's business."
                  (write-string (prin1-to-string form) stream))
                (terpri stream)
                (force-output stream)
+               ;; A card's socket waits for another form after answering; end of input is what
+               ;; makes it hang up.  (The desktop's reads one form and closes on its own.)
+               (when *card-control*
+                 (sb-bsd-sockets:socket-shutdown sock :direction :output))
                ;; The control socket reads ONE form, evaluates it, writes the printed result and
                ;; closes.  So the answer is "everything until end of stream", which is also what
                ;; makes a multi-line report possible.
                (with-output-to-string (out)
                  (loop for line = (read-line stream nil nil)
-                       while line do (write-line line out))))
+                       while line
+                       unless (and *card-control* (string= line "--"))  ; the card's end-of-answer
+                         do (write-line line out))))
           (ignore-errors (when stream (close stream)))
           (ignore-errors (when sock (sb-bsd-sockets:socket-close sock))))
       (serious-condition () nil))))
@@ -112,12 +137,35 @@ only the first one is this function's business."
 ;;; desktop that has never seen site.lisp, and ASDF then puts it there.  That is what makes this
 ;;; work against the desktop currently running, whose launcher predates all of this.
 (defparameter *request*
-  `(progn (asdf:load-system "glass/site")
-          (glass:publish-site-file ,(namestring (truename *path*)) :version ,*version*)
-          (glass:site-report)))
+  (if *card-control*
+      ;; A card publishes only if it was started to (CARD_SITE=1): it does not load the system on
+      ;; demand, because whether the internet-facing process holds the publisher is the card
+      ;; operator's decision, made at start.  (A guard against a mistake, not a boundary — the
+      ;; socket evaluates anything.)  PRINC, so the report comes back as text, not a quoted string.
+      `(if (and (boundp 'cl-user::*card-site*) (symbol-value 'cl-user::*card-site*))
+           (progn (glass:publish-site-file ,(namestring (truename *path*)) :version ,*version*)
+                  (princ (glass:site-report))
+                  (values))
+           "ERROR: this card was not started with CARD_SITE=1 -- not publishing")
+      `(progn (asdf:load-system "glass/site")
+              (glass:publish-site-file ,(namestring (truename *path*)) :version ,*version*)
+              (glass:site-report))))
+
+(defun card-running-p ()
+  "With a card named: T if its pids file ($CARD_DIR/TAG.pids, beside the socket) names a live
+process.  Then nobody answering means the card has no control socket, not that it is gone."
+  (when *card-control*
+    (let ((pids (concatenate 'string (subseq *card-control* 0 (- (length *card-control*)
+                                                               (length ".control")))
+                             ".pids")))
+      (with-open-file (s pids :if-does-not-exist nil)
+        (and s (loop for pid = (read s nil nil)
+                     while pid
+                     thereis (and (integerp pid) (plusp pid)
+                                  (ignore-errors (zerop (sb-posix:kill pid 0))))))))))
 
 (format t "~&publish: ~a  ->  /~a.html~%" *path* *version*)
-(format t "publish: asking the desktop at ~a~%" *control*)
+(format t "publish: asking the ~:[desktop~;card~] at ~a~%" *card-control* *control*)
 (finish-output)
 
 (let ((answer (ask-desktop *request*)))
@@ -127,9 +175,10 @@ only the first one is this function's business."
      (format t "~&~a~%" (%trim answer))
      (when (search "ERROR" answer)
        (format *error-output*
-               "~&publish: the desktop answered but did not publish.  NOT falling back to~@
+               "~&publish: the ~:[desktop~;card~] answered but did not publish.  NOT falling back to~@
                   ~&  publishing here: the site would move and that box would go on minting links~@
-                  ~&  to what used to be there — which is the bug this file exists to prevent.~%")
+                  ~&  to what used to be there — which is the bug this file exists to prevent.~%"
+               *card-control*)
        (finish-output *error-output*)
        (sb-ext:exit :code 1))
      (unless (search "link base ->" answer)
@@ -138,9 +187,19 @@ only the first one is this function's business."
        (sb-ext:exit :code 1))
      (format t "~&publish: the box that minted that link is the box that just published it.~%")
      (finish-output))
+    ;; ---- a card that is running but not answering: NOT here either ----------------------------
+    ((ignore-errors (card-running-p))
+     (format *error-output*
+             "~&publish: the card is running but nothing answers on ~a.  NOT publishing here: the~@
+                ~&  site would move and that card would go on minting links to what used to be there.~@
+                ~&  Restart it with CARD_ONE_PROCESS=1 CARD_CONTROL=1 CARD_SITE=1, or stop it first.~%"
+             *control*)
+     (finish-output *error-output*)
+     (sb-ext:exit :code 1))
     ;; ---- nobody there: do it here -------------------------------------------------------------
     (t
-     (format t "~&publish: no desktop on ~a — publishing from this process.~%" *control*)
+     (format t "~&publish: no ~:[desktop~;card~] on ~a — publishing from this process.~%"
+             *card-control* *control*)
      (format t "publish: the memo (~a) is what the desktop will read when it next starts.~%"
              glass:*site-url-file*)
      (finish-output)

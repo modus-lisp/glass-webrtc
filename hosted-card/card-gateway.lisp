@@ -23,6 +23,10 @@
 ;;;; One process:
 ;;;;   CARD_ONE_PROCESS=1  also the DESKTOP: glass's window manager on GLASS_PORT in this process,
 ;;;;                       so the card is one Lisp, not two (card.sh then starts nothing else)
+;;;; Its own client page:
+;;;;   CARD_SITE=1         load :glass/site: links name what this card last PUBLISHED (the memo
+;;;;                       ~/.glass/site-url outranks GLASS_LOGIN_URL_BASE), and with CARD_CONTROL=1 a
+;;;;                       publish can be asked for over the control socket -- see card-site.lisp
 (require :asdf)
 (defvar *root* (or (sb-ext:posix-getenv "MODUS_ROOT") "/opt/modus-lisp"))
 ;; third-party systems (cl-base64 ...) from Quicklisp's tree, BEHIND the pinned tree
@@ -32,6 +36,9 @@
 (defun env (n) (sb-ext:posix-getenv n))
 (let ((t0 (get-internal-real-time)))
   (asdf:load-system "glass/nostr")
+  ;; CARD_SITE=1: the site publisher (glass/site), off by default -- card-site.lisp says why
+  (load (merge-pathnames "card-site.lisp" *load-truename*))
+  (load-card-site)
   ;; the full gateway starts itself when loaded; this file configures admission and the desktop
   ;; first and starts it at the end, as it does the lean one
   (pushnew :glass-webrtc-no-autostart *features*)
@@ -163,6 +170,8 @@
   (set-by-name "GLASS" "*LOGIN-CODE-FILE*" nil)
   (set-by-name "GLASS" "*TURN-ICE*" (list (env "TURN_SERVER_URL") (env "TURN_USER") (env "TURN_PASS")))
   (set-by-name "GLASS" "*LOGIN-URL-BASE*" (env "GLASS_LOGIN_URL_BASE"))
+  ;; CARD_SITE: the last publish outranks the launcher's guess, so it goes on AFTER it
+  (card-site-install-memo)
   ;; CARD_LOGIN_TTL: seconds a DM'd login link stays good (glass's default is 10 minutes)
   (when (env "CARD_LOGIN_TTL") (set-by-name "GLASS" "*LOGIN-TTL*" (parse-integer (env "CARD_LOGIN_TTL"))))
   (set-by-name "WEBRTC-DATA" "*STATS-FILE*" (format nil "~a/glass-stats.sexp" store))
