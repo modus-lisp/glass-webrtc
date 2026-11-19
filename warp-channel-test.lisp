@@ -56,8 +56,8 @@
 By NAME and out of the text, so what runs here is what is in that file — and so that adding a
 definition to it can never silently change what this test is testing.  Nothing else in the file is
 read, evaluated, or so much as looked at."
-  (let* ((needle (format nil "(~a ~a " kind name))
-         (at (search needle source)))
+  (let* ((at (or (search (format nil "(~a ~a " kind name) source)          ; the name, then a space
+                 (search (format nil "(~a ~a~%" kind name) source))))      ; ...or a line break
     (unless at (error "warp-channel-test: no (~a ~a ...) in the source" kind name))
     (eval (read-from-string source t nil :start at))
     name))
@@ -66,17 +66,18 @@ read, evaluated, or so much as looked at."
 ;; What warp-channel.lisp needs from the gateway is no longer a store — it is WHERE THE DESKTOP IS.
 ;; Lifted rather than transcribed for the same reason AUTHORIZED-P used to be: the harness must
 ;; break if the gateway renames or re-defaults them, instead of quietly agreeing with itself.
-(dolist (f '("%unix-now")) (lift "defun" f))
-(dolist (v '("*glass-host*" "*admission-port*")) (lift "defparameter" v))
+(dolist (f '("%unix-now" "glass-endpoint")) (lift "defun" f))
+(dolist (v '("*glass-host*" "*glass-port*" "*glass-path*" "*admission-port*" "*admission-host*"))
+  (lift "defparameter" v))
 ;; and the control channel's id, from the file that owns it, so "these two do not collide" is a
 ;; claim about the shipped constants rather than about two numbers written down in a test
 (lift "defconstant" "+control-stream-id+" *profiles-source*)
 (lift "defun" "control-sid-p" *profiles-source*)
 (ok "the gateway names its desktop's admission port, and the default is the convention"
-    (and (boundp '*admission-port*) (= 5915 *admission-port*)))
-(ok "...one past the microphone's 5914, which is one past the mix's 5913, which is a decade past
-        the screen's 5903 — arithmetic, not four numbers typed into a startup script"
-    (= *admission-port* (glass:seat-admission-port 5903)))
+    (and (boundp '*admission-port*) (= *admission-port* (+ *glass-port* 12))))
+(ok "...one past the microphone's (screen + 11), one past the mix's (screen + 10) -- arithmetic on
+        the gateway's own screen port, and the same arithmetic the desktop does"
+    (= *admission-port* (glass:seat-admission-port *glass-port*)))
 (ok "and the control channel's stream id, from video-profiles.lisp" (= 100 +control-stream-id+))
 (ok "THE GATEWAY NO LONGER HAS A DEVICE STORE OR AN ALLOWLIST OF ITS OWN.
         That is the claim the whole move rests on: one store, one writer, in the process that

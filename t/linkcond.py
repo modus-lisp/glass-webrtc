@@ -271,6 +271,34 @@ def audio_check(p, name):
           f"stretched {100*stretched/got:.1f}% (decel {d.get('insertedSamplesForDeceleration',0)}, accel {d.get('removedSamplesForAcceleration',0)}), "
           f"concealed {100*d.get('concealedSamples',0)/got:.1f}%, buffer {delay:.0f} ms (target {1000*(a1.get('jitterBufferTargetDelay') or 0)/max(1,a1.get('jitterBufferEmittedCount') or 1):.0f})", flush=True)
 
+WARP_APPS = [("devices", "terminals", "#warpPanel"), ("files", "files", "#filesPanel"),
+             ("media", "media", "#mediaPanel")]
+
+def warp_check(p, name):
+    """LINKCOND_WARP=1 (a card with WARP_CHANNEL, WARP_FILES and WARP_MEDIA): the phone's other apps,
+    over the warp channel.  Each is opened from the apps button and must fill from the box."""
+    for app, label, panel in WARP_APPS:
+        opened = p.evaluate("""([app, label]) => {
+            const chip = document.querySelector('#appSwitch.on button[data-app="' + app + '"]');
+            if (chip) { if (chip.disabled) return 'disabled'; chip.click(); return 'ok'; }   // a full panel's strip
+            const apps = document.querySelector('button[aria-label=apps]'); if (!apps) return 'no apps button';
+            apps.click();
+            const b = [...document.querySelectorAll('#appsMenu button')].find(b => b.textContent.includes(label));
+            if (!b) return 'not in the menu';
+            if (b.disabled) return 'disabled';
+            b.click(); return 'ok'; }""", [app, label])
+        rows, t0 = 0, time.time()
+        while opened == "ok" and time.time() - t0 < 30:
+            rows = p.evaluate("(sel) => { const e = document.querySelector(sel); return e && "
+                              "getComputedStyle(e).display !== 'none' ? e.querySelectorAll('li').length : -1 }", panel)
+            if rows > 0: break
+            time.sleep(0.5)
+        p.screenshot(path=str(OUT / f"{name}-warp-{app}.png"))
+        ok(f"{name}: the {app} app opens over the warp channel and fills from the box",
+           opened == "ok" and rows > 0, f"{opened}, {rows} rows")
+    p.evaluate("() => { const b = [...document.querySelectorAll('#appSwitch button.close, #appsMenu button')]"
+               ".find(b => b.classList.contains('close') || b.textContent.includes('desktop')); if (b) b.click(); }")
+
 def title_bar(png):
     """(x, y, left) inside the topmost window title bar on the screenshot, or None: the first run
     of light-grey rows at least 150 px wide, LEFT where that run begins.  Also the share of the
@@ -555,6 +583,8 @@ try:
                     ok(f"{name}: ...and followed a phone-shaped window", good,
                        v and f"desktop {v[0]}x{v[1]}, window {v[2]}x{v[3]}")
                     p.screenshot(path=str(OUT / f"{name}-phone.png"))
+                    if os.environ.get("LINKCOND_WARP"):
+                        warp_check(p, name)
                     # SHARP OR FUZZY, switched live -- only on a box that offers both (a video card).
                     if p.evaluate("window.__deskMode"):
                         click = ("(label) => { const b = [...document.querySelectorAll('button')]"

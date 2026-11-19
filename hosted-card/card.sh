@@ -32,6 +32,8 @@
 #                Off by default: the gateway and the desktop are one internet-facing process here.
 #   CARD_APPS=files,browser,podcasts,voice (or all) the McCLIM desktop's apps on the window
 #                manager's menu, with GLASS_VOICE / GLASS_EARS for the voice -- see card-apps.lisp
+#   WARP_CHANNEL=1 the phone's ⊞ apps over the warp channel: enrolled terminals, and with
+#                WARP_FILES=1 a file browser, WARP_MEDIA=1 a media player -- see warp-channel.lisp
 #   LOGIN_URL_BASE, NOSTR_RELAYS, PAYLOAD_FILE, QUICKLISP_SOFTWARE
 #   CARD_LOGIN_TTL, CARD_ONE_THREAD, CARD_TRACE, CARD_ADMDIAG, CARD_TS, CARD_SYMDUMP -- see
 #   card-gateway.lisp

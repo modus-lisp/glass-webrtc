@@ -15,6 +15,8 @@
 ;;;;             Pictures tab (glass/media-pictures) over GLASS_PICTURES or ~/Pictures, and its Documents
 ;;;;             tab (glass/media-documents, PDFs through folio) over GLASS_DOCUMENTS or ~/Documents; without them
 ;;;;             Media is its Stations alone
+;;;;   remote    Remote: another box's desktop as a window, dialled over Nostr + WebRTC the way the
+;;;;             phone reaches this one (glass/remote-webrtc, glass-webrtc/dial; SBCL)
 ;;;;   all       every one of them
 ;;;;
 ;;;; Unset, nothing is loaded and the card is what it was -- on the board as everywhere else.
@@ -35,7 +37,7 @@
                       for name = (string-trim " " (subseq raw start (or comma (length raw))))
                       unless (string= name "") collect (intern (string-upcase name) :keyword)
                       while comma do (setf start (1+ comma)))))
-    (if (member :all names) '(:files :browser :podcasts :voice :media) names)))
+    (if (member :all names) '(:files :browser :podcasts :voice :media :remote) names)))
 
 (defun %card-find-warp-systems ()
   "warp keeps its encodings' systems in subdirectories (warp/media, warp/glass, ...), which the
@@ -71,6 +73,7 @@ card's registry -- one level under MODUS_ROOT -- does not reach."
                             (:files '("warren"))
                             (:browser '("loom/glass"))
                             (:podcasts '("spool/desk"))
+                            (:remote '("glass/remote-webrtc"))
                             (:voice '("glass/voice-apps" "glass/speech" "glass/hearing" "glass/mic-stream"))
                             (:media (%card-find-warp-systems) '("warp-media/glass" "glass/media-pictures" "glass/media-documents"))
                             (t (format t "~&card-apps: no app called ~(~a~)~%" app) nil)))
