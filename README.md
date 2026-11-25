@@ -7,7 +7,7 @@ Tor, P2P. webrtc-data is a transparent RFB pipe: **noVNC** (in the browser) is t
 
 ```
 browser (noVNC on an RTCDataChannel)
-   │   SDP offer/answer over HTTP (hunchentoot)
+   │   SDP offer/answer over HTTP (cl-transport/http-server)
    ▼
 webrtc-data gateway  ──TCP──▶  glass RFB server (:5900)
    (ICE-lite · DTLS 1.2 · SCTP/DCEP)
@@ -16,7 +16,7 @@ webrtc-data gateway  ──TCP──▶  glass RFB server (:5900)
 ## Run
 1. A glass RFB server on :5900 — e.g. `(glass-term:run :port 5900)`.
 2. A noVNC 1.7+ checkout. Put it at `../novnc/` (next to this demo) or set `NOVNC_DIR`.
-3. `(ql:quickload :hunchentoot)` is used for the page + one `POST /signal`.
+3. `cl-transport/http-server` serves the page + one `POST /signal` (no Quicklisp).
 4. Load the gateway:
    ```
    CL_SOURCE_REGISTRY="(:source-registry (:tree \"/path/to/repos\") :inherit-configuration)" \

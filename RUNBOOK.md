@@ -3,7 +3,7 @@
 `DEPLOY.md` covers publishing the web client. This covers everything else: what the pieces
 are, how a phone reaches a desktop, and what someone starting from an empty machine has to do.
 
-**`README.md` in this directory is stale** — it documents the retired `gateway.lisp` (hunchentoot,
+**`README.md` in this directory is stale** — it documents the retired `gateway.lisp` (HTTP — cl-transport/http-server, formerly hunchentoot —
 `POST /signal`, port 8765). That path still works and is the shortest way to see the system run
 locally (see "The short path"), but it is not what serves the live desktop.
 
@@ -507,7 +507,7 @@ republishing, and issuing a fresh link.
 
 ### The short path — LAN, no Nostr, no TURN, no publishing
 
-Use the retired-but-working HTTP gateway: `gateway.lisp` + `index.html`, hunchentoot on `GW_PORT`
+Use the retired-but-working HTTP gateway: `gateway.lisp` + `index.html`, cl-transport/http-server on `GW_PORT`
 (8765), noVNC from `NOVNC_DIR`, offer over `POST /signal`. No keys, no relays, no build step. Point a
 browser at `http://<host>:8765/`. Do this first to confirm the stack works at all.
 

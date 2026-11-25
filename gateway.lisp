@@ -1,6 +1,6 @@
 ;;;; gateway.lisp — serve glass over WebRTC to a browser (noVNC on the data channel).
 ;;;;
-;;;; hunchentoot serves the noVNC page + one POST /signal for the SDP exchange.  For each
+;;;; cl-transport/http-server serves the noVNC page + one POST /signal for the SDP exchange.  For each
 ;;;; browser we set up the webrtc-data answerer (ICE-lite -> DTLS -> SCTP), and when the data
 ;;;; channel opens we open a TCP connection to glass's RFB server and pump bytes both ways:
 ;;;;   glass -> channel  (one message per read; SCTP fragments + the peer reassembles)
@@ -20,12 +20,9 @@
   ;; starts nothing and listens on nothing — see gateway-nostr.lisp, which loads it for the
   ;; audio, microphone and admission halves as well.
   (asdf:load-system "glass")
-  ;; Quicklisp when it is loaded; otherwise the systems are already on ASDF's search path -- a
-  ;; card (hosted-card/card-gateway.lisp) puts Quicklisp's software tree there and loads no
-  ;; Quicklisp, and the reader cannot even see QL:QUICKLOAD in a file meant to load there.
-  (if (find-package "QL")
-      (funcall (find-symbol "QUICKLOAD" "QL") '(:hunchentoot) :silent t)
-      (asdf:load-system "hunchentoot")))
+  ;; The HTTP half is the org's own (it was hunchentoot, which brought cl+ssl, CFFI and
+  ;; OpenSSL along for a server that never spoke TLS): no Quicklisp needed.
+  (asdf:load-system "cl-transport/http-server"))
 
 (in-package #:webrtc-data)
 
@@ -134,10 +131,10 @@
       (when glass (ignore-errors (sb-bsd-sockets:socket-close glass)))
       (format *error-output* "~&[gw] session closed~%"))))
 
-(defun handle-signal ()
+(defun handle-signal (request)
   "POST /signal: body is the browser's offer SDP; return our answer SDP."
-  (setf (hunchentoot:content-type*) "application/sdp")
-  (let* ((offer (parse-sdp (hunchentoot:raw-post-data :force-text t)))
+  (setf (cl-transport.http-server:reply-content-type request) "application/sdp")
+  (let* ((offer (parse-sdp (cl-transport.http-server:request-body-string request)))
          ;; ICE_LOCAL_IP pins the advertised host candidate (multi-homed / netns / container
          ;; deploys, where auto-detect can't reach 8.8.8.8); nil = auto-detect.
          (agent (make-ice :local-ip (uiop:getenv "ICE_LOCAL_IP")))
@@ -154,20 +151,21 @@
     (bt:make-thread (lambda () (run-session conn)) :name "webrtc-session")
     answer))
 
-(defun handle-index ()
-  (setf (hunchentoot:content-type*) "text/html") *index*)
+(defun handle-index (request)
+  (setf (cl-transport.http-server:reply-content-type request) "text/html") *index*)
 
-(defun handle-drop ()
+(defun handle-drop (request)
   "GET /drop?rate=R — set *SCTP-DROP-RATE* (a dev knob for simulating outbound loss)."
-  (setf (hunchentoot:content-type*) "text/plain")
-  (let ((r (ignore-errors (read-from-string (hunchentoot:get-parameter "rate")))))
+  (setf (cl-transport.http-server:reply-content-type request) "text/plain")
+  (let ((r (ignore-errors (let ((*read-eval* nil))
+                            (read-from-string (cl-transport.http-server:query-param request "rate"))))))
     (when (realp r)
       (setf (symbol-value (find-symbol "*SCTP-DROP-RATE*" :webrtc-data)) (float r 1d0))))
   (format nil "drop-rate=~a~%" (symbol-value (find-symbol "*SCTP-DROP-RATE*" :webrtc-data))))
 
-(defun handle-stats ()
+(defun handle-stats (request)
   "GET /stats — the current session's SCTP transport stats as JSON."
-  (setf (hunchentoot:content-type*) "application/json")
+  (setf (cl-transport.http-server:reply-content-type request) "application/json")
   (if *last-assoc*
       (format nil "{~{~a~^,~}}"
               (loop for (k v) on (sctp-stats *last-assoc*) by #'cddr
@@ -176,7 +174,9 @@
                                             ((floatp v) (format nil "~,2f" v)) (t v)))))
       "{}"))
 
-(defvar *acceptor* nil "The running hunchentoot acceptor, or NIL.")
+(defvar *acceptor* nil
+  "The running HTTP server (a CL-TRANSPORT.HTTP-SERVER:SERVER), or NIL.  The name is from
+   when it was a hunchentoot acceptor; vessel's one.lisp waits on it being non-NIL.")
 
 (defun start-gateway (&key (port *port*) (address "0.0.0.0") (park t))
   "Install the routes, start the server, and (unless PARK is NIL) never return.
@@ -190,25 +190,29 @@
 
    PARK is what kiln's boot files want: they load this and expect it to hold the
    process open.  A caller that has its own event loop passes :PARK NIL and gets the
-   acceptor back."
-  (setf hunchentoot:*dispatch-table*
-        (list (hunchentoot:create-folder-dispatcher-and-handler "/novnc/" *novnc*)
-              (hunchentoot:create-regex-dispatcher "^/signal$" #'handle-signal)
-              (hunchentoot:create-regex-dispatcher "^/drop$" #'handle-drop)
-              (hunchentoot:create-regex-dispatcher "^/stats$" #'handle-stats)
-              (hunchentoot:create-regex-dispatcher "^/$" #'handle-index)))
+   server back.  PORT 0 binds an ephemeral port: (cl-transport.http-server:server-port
+   *acceptor*) says which.
+
+   The routes are THIS server's own, not a global dispatch table (hunchentoot's was one
+   per image, so webrtc-data/transport's :webrtc EXPOSE in the same image replaced them)."
   (setf *acceptor*
-        (hunchentoot:start (make-instance 'hunchentoot:easy-acceptor
-                                          :port port :address address)))
+        (cl-transport.http-server:start-server
+         :host address :port port :name "gateway"
+         :routes `(("POST" "/signal" ,#'handle-signal)
+                   ("GET" "/drop" ,#'handle-drop)
+                   ("GET" "/stats" ,#'handle-stats)
+                   ("GET" "/" ,#'handle-index))
+         :static `(("/novnc/" ,*novnc*))))
   (format t "~&@@ gateway on http://~a:~a  (glass ~a, noVNC ~a)~%"
-          address port (glass:endpoint-string :host *glass-host* :port *glass-port*) *novnc*)
+          address (cl-transport.http-server:server-port *acceptor*)
+          (glass:endpoint-string :host *glass-host* :port *glass-port*) *novnc*)
   (finish-output)
   (when park (loop (sleep 5)))
   *acceptor*)
 
 (defun stop-gateway ()
-  "Stop the acceptor if one is running.  There was no way to do this before."
+  "Stop the server if one is running: when this returns its port is closed."
   (when *acceptor*
-    (ignore-errors (hunchentoot:stop *acceptor*))
+    (ignore-errors (cl-transport.http-server:stop-server *acceptor*))
     (setf *acceptor* nil)
     t))

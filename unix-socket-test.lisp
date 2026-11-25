@@ -24,7 +24,7 @@
     (asdf:load-system "glass/mic-stream")     ; brings :glass and :glass/audio-stream
     (asdf:load-system "glass/nostr")
     (asdf:load-system "cl-nostr")
-    (ql:quickload '(:hunchentoot) :silent t)))
+    (asdf:load-system "cl-transport/http-server")))   ; gateway.lisp's HTTP half
 
 (defpackage #:gw-unix-test (:use #:cl)) (in-package #:gw-unix-test)
 

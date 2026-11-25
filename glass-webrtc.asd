@@ -1,7 +1,7 @@
 ;;;; glass-webrtc.asd — the gateway that puts glass in a browser.
 
 (asdf:defsystem "glass-webrtc"
-  :description "glass over WebRTC: hunchentoot serves noVNC and one POST /signal for the
+  :description "glass over WebRTC: cl-transport/http-server serves noVNC and one POST /signal for the
 SDP exchange, webrtc-data answers (ICE-lite -> DTLS -> SCTP), and when the data channel
 opens the gateway pumps RFB bytes to glass in both directions.  Transparent to RFB —
 noVNC is the client and glass is the server; the gateway only carries.
@@ -14,18 +14,20 @@ machine's home directory."
   :version "0.0.1"
   :author "ynniv"
   :license "MIT"
-  ;; hunchentoot is quicklisp's; the rest are siblings.  These used to be quickloaded
-  ;; from inside gateway.lisp at load time, which works for a script and is invisible to
-  ;; anything that wants to know what this depends on.
+  ;; All siblings.  The HTTP server was hunchentoot (quicklisp's, and through it cl+ssl ->
+  ;; CFFI -> OpenSSL, for a server that never spoke TLS); it is cl-transport/http-server now.
+  ;; These used to be quickloaded from inside gateway.lisp at load time, which works for a
+  ;; script and is invisible to anything that wants to know what this depends on.
   ;; webrtc-media for the VP8 encoder the video ladder drives — an undeclared
   ;; dependency until now, because a subdirectory loaded by path declares nothing.
-  :depends-on ("glass-webrtc/media" "hunchentoot")
+  :depends-on ("glass-webrtc/media" "cl-transport/http-server")
   :serial t
   :components ((:file "gateway")))
 
 ;;; The media half both gateways share: the audio/video hooks and the VP8 ladder, without the HTTP
-;;; server.  Split out so the nostr gateway does not pull in hunchentoot -> cl+ssl -> CFFI, which
-;;; modus does not have: the nostr gateway never served HTTP, it only loaded the system that does.
+;;; server.  Split out so the nostr gateway does not pull in the HTTP server: it never served HTTP,
+;;; it only loaded the system that does.  (That server was hunchentoot -> cl+ssl -> CFFI, which modus
+;;; does not have; it is cl-transport/http-server now, but the split still keeps the nostr side lean.)
 (asdf:defsystem "glass-webrtc/media"
   :description "The gateways' media half: audio/video hooks and the VP8 bandwidth ladder."
   :depends-on ("webrtc-data" "webrtc-media" "glass")
@@ -45,7 +47,7 @@ of a POST, so a browser reaches the desktop without a reachable address."
                (:file "gateway-nostr")))
 
 ;;; The same nostr gateway with ONLY the RFB data channel: no audio, no VP8 video, no HTTP/noVNC
-;;; (hunchentoot), none of webrtc-media.  For a board that serves its own desktop -- a Pi Zero --
+;;; server), none of webrtc-media.  For a board that serves its own desktop -- a Pi Zero --
 ;;; where the media stack is most of the code and its encoder far too heavy.  Same session,
 ;;; admission, signalling and channels; see media-hooks.lisp for how the media calls go away.
 (asdf:defsystem "glass-webrtc/nostr-lean"
