@@ -22,7 +22,8 @@
   (asdf:load-system "glass")
   ;; The HTTP half is the org's own (it was hunchentoot, which brought cl+ssl, CFFI and
   ;; OpenSSL along for a server that never spoke TLS): no Quicklisp needed.
-  (asdf:load-system "cl-transport/http-server"))
+  (asdf:load-system "cl-transport/http-server")
+  (asdf:load-system "cl-transport/chan"))
 
 (in-package #:webrtc-data)
 
@@ -58,121 +59,202 @@
   ;; (On a socket file there is no Nagle to disable, and OPEN-CONNECTION ignores the refusal.)
   (values (glass:open-connection :host *glass-host* :port *glass-port*)))
 
-(defvar *last-assoc* nil)   ; most recent SCTP association, for the /stats endpoint
+;;; ---- THREADS SHARE NOTHING ---------------------------------------------------------------------
+;;;
+;;; An HTTP handler runs on a connection thread of the server.  It stores nothing of its own
+;;; anywhere shared: POST /signal starts the browser's session on a NAMED function (SESSION-MAIN)
+;;; with the offer STRING as an argument and waits for the answer on a REPLY channel
+;;; (CL-TRANSPORT.CHAN); the session thread owns everything it builds -- the ICE agent (PULL mode:
+;;; it reads the UDP socket itself), DTLS, the SCTP association and the glass connection, which
+;;; it also reads itself on every pass of its loop.  So there are no per-session helper threads.
+;;;
+;;; What other threads need to SEE crosses through memory made once, at load, on the main thread,
+;;; and written only with numbers and bytes -- which on modus is the only kind of store one thread
+;;; may make into another's memory:
+;;;   *KNOBS*       integer knobs (the /drop rate, in parts per million), read by every session on
+;;;                 every pass.  Integers, not doubles: on modus a DOUBLE-FLOAT array is not
+;;;                 specialised (its element type is T), so a double a worker made is an object,
+;;;                 and storing it into the main thread's array is refused.
+;;;   *STATS-BUF*   the latest session's SCTP stats as JSON bytes, with *STATS-META* = [generation,
+;;;                 length]: the writer makes the generation odd while it writes, so a reader that
+;;;                 sees it change (or odd) reads again.
 
-(defun run-session (conn)
-  "Drive DTLS, then run the data channel; bridge it to glass once it opens."
-  (let ((glass nil))
+(defvar *knobs* (make-array 1 :element-type '(unsigned-byte 32) :initial-element 0)
+  "[0] the outbound drop rate GET /drop sets, in parts per million; each session copies it into
+its *SCTP-DROP-RATE*.")
+
+(defun drop-rate () (/ (aref *knobs* 0) 1d6))
+(defconstant +stats-bytes+ 8192)
+(defvar *stats-buf* (make-array +stats-bytes+ :element-type '(unsigned-byte 8) :initial-element 0))
+(defvar *stats-meta* (make-array 2 :element-type '(unsigned-byte 32) :initial-element 0))
+(defvar *stats-lock* (sb-thread:make-mutex :name "gateway stats"))
+
+(defun %stats-json (stats)
+  (format nil "{~{~a~^,~}}"
+          (loop for (k v) on stats by #'cddr
+                collect (format nil "\"~(~a~)\":~a"
+                                k (cond ((null v) -1) ((symbolp v) (format nil "\"~(~a~)\"" v))
+                                        ((floatp v) (format nil "~,2f" v)) (t v))))))
+
+(defun publish-stats (stats)
+  "STATS (an SCTP-STATS plist) as what GET /stats answers, until the next one."
+  (let* ((bytes (as-u8vec (map 'vector #'char-code (%stats-json stats))))
+         (n (min (length bytes) +stats-bytes+)))
+    (sb-thread:with-mutex (*stats-lock*)
+      (setf (aref *stats-meta* 0) (logand (1+ (aref *stats-meta* 0)) #xffffffff))   ; odd: writing
+      (replace *stats-buf* bytes :end2 n)
+      (setf (aref *stats-meta* 1) n)
+      (setf (aref *stats-meta* 0) (logand (1+ (aref *stats-meta* 0)) #xffffffff)))))
+
+(defun read-stats ()
+  "The JSON the last session published, or \"{}\"."
+  (loop
+    (let ((g (aref *stats-meta* 0)))
+      (when (evenp g)
+        (let* ((n (aref *stats-meta* 1))
+               (s (map 'string #'code-char (subseq *stats-buf* 0 n))))
+          (when (= g (aref *stats-meta* 0))
+            (return (if (zerop n) "{}" s))))))
+    (sleep 0.001)))
+
+;;; ---- the session ---------------------------------------------------------------------------------
+
+(defun %print-rates (prev now dt)
+  (flet ((d (k) (- (getf now k) (getf prev k))))
+    (format *error-output*
+            "~&[stats] out ~,1f KB/s  in ~,1f KB/s  rtx ~a (~,1f%)  drops ~a  ~
+             cwnd ~a  rwnd ~a  flight ~a  outq ~a  srtt ~a  rto ~,2f~%"
+            (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt)
+            (d :rtx)
+            (if (plusp (d :data-out)) (* 100d0 (/ (d :rtx) (d :data-out))) 0d0)
+            (d :drops)
+            (getf now :cwnd) (getf now :peer-rwnd) (getf now :flight)
+            (getf now :send-q)
+            (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))
+            (getf now :rto))
+    ;; machine-readable series line (parsed by the perf harness)
+    (format *error-output*
+            "~&PERFSVR ~,1f ~,2f ~,2f ~a ~a ~a ~,1f ~a ~a ~,2f~%"
+            (/ (float (- (get-internal-real-time) *epoch*) 1d0) internal-time-units-per-second)
+            (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt)
+            (d :rtx) (d :drops) (getf now :cwnd)
+            (or (getf now :srtt-ms) -1) (getf now :flight) (getf now :send-q)
+            (getf now :rto))
+    (finish-output *error-output*)))             ; flush: survive an ungraceful kill
+
+(defun session-main (offer-sdp reply)
+  "One browser's session, on its own thread: answer OFFER-SDP on REPLY, drive DTLS, run the data
+channel, and bridge it to glass once it opens -- every part of it on this thread."
+  (let ((glass nil) (glass-fd nil) (agent nil) (answered nil) (sid nil)
+        (buf (make-array 16384 :element-type '(unsigned-byte 8)))
+        (prev nil) (t0 (get-internal-real-time))
+        (*sctp-drop-rate* (drop-rate)))           ; this thread's own copy of the knob
     (unwind-protect
         (handler-case
-            (progn
+            (let* ((offer (parse-sdp offer-sdp))
+                   ;; ICE_LOCAL_IP pins the advertised host candidate (multi-homed / netns /
+                   ;; container deploys, where auto-detect can't reach 8.8.8.8); nil = auto-detect.
+                   (a (setf agent (make-ice :local-ip (uiop:getenv "ICE_LOCAL_IP"))))
+                   (conn (webrtc-dtls-setup a :remote-fingerprint (sdp-fingerprint offer)))
+                   ;; GATHER_SRFLX=1 → advertise our public (STUN) address for NAT traversal;
+                   ;; TURN_SERVER/TURN_USER/TURN_PASS additionally Allocates a TURN relay
+                   ;; candidate, which covers symmetric NAT.  Both add a round-trip; off for LAN.
+                   (answer (ice-answer a offer :fingerprint (dtls-conn-fingerprint conn)
+                                               :gather-srflx (and (uiop:getenv "GATHER_SRFLX") t)
+                                               :gather-relay (and (uiop:getenv "TURN_SERVER") t))))
+              (ice-serve a :mode :pull)
+              ;; full-agent checks (punch our NAT mapping open toward the peer) when NAT traversal is on
+              (when (uiop:getenv "GATHER_SRFLX") (ice-start-checks a))
+              (setf answered t)
+              (cl-transport.chan:chan-send reply answer :timeout 5)
               (webrtc-dtls-run conn)
               (webrtc-serve-datachannel
-               conn :duration 3600.0
+               conn :duration 3600.0 :tick 0.005
                :on-ready
-               (lambda (assoc sid)
-                 (setf glass (glass-connect) *last-assoc* assoc)
-                 (format *error-output* "~&[gw] channel open (stream ~a) -> glass ~a~%"
-                         sid (glass:endpoint-string :host *glass-host* :port *glass-port*))
-                 ;; glass -> browser: read RFB, send each read as ONE message — SCTP now
-                 ;; fragments it internally and the peer reassembles, so noVNC sees one
-                 ;; onmessage per read instead of one per 1KB (far fewer data-channel events)
-                 (bt:make-thread
-                  (lambda ()
-                    (let ((buf (make-array 16384 :element-type '(unsigned-byte 8))))
-                      (handler-case
-                          (loop
-                            (multiple-value-bind (b n) (sb-bsd-sockets:socket-receive glass buf nil)
-                              (declare (ignore b))
-                              (when (or (null n) (zerop n)) (return))
-                              (sctp-send-binary assoc sid (subseq buf 0 n))))
-                        (error () nil))))
-                  :name "glass->ch")
-                 ;; transport-health monitor: log SCTP rates every 2s until the peer aborts
-                 (bt:make-thread
-                  (lambda ()
-                    (let ((prev (sctp-stats assoc)) (t0 (get-internal-real-time)))
-                      (loop until (eq (getf (sctp-stats assoc) :state) :aborted) do
-                        (sleep 1.0)
-                        (let* ((now (sctp-stats assoc))
-                               (dt (max 1d-3 (/ (float (- (get-internal-real-time) t0) 1d0)
-                                                internal-time-units-per-second))))
-                          (flet ((d (k) (- (getf now k) (getf prev k))))
-                            (format *error-output*
-                                    "~&[stats] out ~,1f KB/s  in ~,1f KB/s  rtx ~a (~,1f%)  drops ~a  ~
-                                     cwnd ~a  rwnd ~a  flight ~a  outq ~a  srtt ~a  rto ~,2f~%"
-                                    (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt)
-                                    (d :rtx)
-                                    (if (plusp (d :data-out)) (* 100d0 (/ (d :rtx) (d :data-out))) 0d0)
-                                    (d :drops)
-                                    (getf now :cwnd) (getf now :peer-rwnd) (getf now :flight)
-                                    (getf now :send-q)
-                                    (let ((s (getf now :srtt-ms))) (if s (format nil "~,1fms" s) "-"))
-                                    (getf now :rto))
-                            ;; machine-readable series line (parsed by the perf harness)
-                            (format *error-output*
-                                    "~&PERFSVR ~,1f ~,2f ~,2f ~a ~a ~a ~,1f ~a ~a ~,2f~%"
-                                    (/ (float (- (get-internal-real-time) *epoch*) 1d0)
-                                       internal-time-units-per-second)
-                                    (/ (d :bytes-out) 1024d0 dt) (/ (d :bytes-in) 1024d0 dt)
-                                    (d :rtx) (d :drops) (getf now :cwnd)
-                                    (or (getf now :srtt-ms) -1) (getf now :flight) (getf now :send-q)
-                                    (getf now :rto))
-                            (finish-output *error-output*))   ; flush: survive an ungraceful kill
-                          (setf prev now t0 (get-internal-real-time))))))
-                  :name "gw-stats"))
+               (lambda (assoc id)
+                 (declare (ignore assoc))
+                 (unless sid
+                   (setf sid id glass (glass-connect)
+                         glass-fd (sb-bsd-sockets:socket-file-descriptor glass))
+                   (format *error-output* "~&[gw] channel open (stream ~a) -> glass ~a~%"
+                           id (glass:endpoint-string :host *glass-host* :port *glass-port*))))
                :on-message
-               (lambda (assoc sid payload)
-                 (declare (ignore assoc sid))
+               (lambda (assoc id payload)
+                 (declare (ignore assoc id))
                  (when (and glass (plusp (length payload)))
-                   (sb-bsd-sockets:socket-send glass (as-u8vec payload) (length payload))))))
-          (error (e) (format *error-output* "~&[gw] session error: ~a~%" e)))
+                   (sb-bsd-sockets:socket-send glass (as-u8vec payload) (length payload))))
+               :on-pass
+               (lambda (assoc)
+                 (setf *sctp-drop-rate* (drop-rate))
+                 ;; glass -> browser: what glass has sent, each read as ONE message (SCTP
+                 ;; fragments it; the peer reassembles, so noVNC sees one onmessage per read)
+                 (when glass
+                   (loop repeat 8
+                         while (sb-sys:wait-until-fd-usable glass-fd :input 0)
+                         do (multiple-value-bind (b n) (sb-bsd-sockets:socket-receive glass buf nil)
+                              (declare (ignore b))
+                              (when (or (null n) (zerop n))
+                                (error "glass closed the connection"))
+                              (sctp-send-binary assoc sid (subseq buf 0 n)))))
+                 ;; transport health, every second: logged, and published for GET /stats
+                 (when (and sid (> (- (get-internal-real-time) t0) internal-time-units-per-second))
+                   (let ((now (sctp-stats assoc))
+                         (dt (/ (float (- (get-internal-real-time) t0) 1d0)
+                                internal-time-units-per-second)))
+                     (when prev (%print-rates prev now dt))
+                     (publish-stats now)
+                     (setf prev now t0 (get-internal-real-time)))))))
+          (error (e)
+            (unless answered
+              (ignore-errors (cl-transport.chan:chan-send reply (list :error (princ-to-string e))
+                                                          :timeout 1)))
+            (format *error-output* "~&[gw] session error: ~a~%" e)))
       ;; cleanup: close the glass connection so glass's per-client thread exits too
       (when glass (ignore-errors (sb-bsd-sockets:socket-close glass)))
+      (when agent (ignore-errors (ice-close agent)))
       (format *error-output* "~&[gw] session closed~%"))))
+
+;;; Reply channels, made once by START-GATEWAY on the thread that calls it (on modus a channel is
+;;; never reclaimed): a free list of their numbers is itself a channel.
+(defvar *replies* nil)
+(defvar *free-replies* nil)
+(defconstant +max-signals+ 16)
 
 (defun handle-signal (request)
   "POST /signal: body is the browser's offer SDP; return our answer SDP."
   (setf (cl-transport.http-server:reply-content-type request) "application/sdp")
-  (let* ((offer (parse-sdp (cl-transport.http-server:request-body-string request)))
-         ;; ICE_LOCAL_IP pins the advertised host candidate (multi-homed / netns / container
-         ;; deploys, where auto-detect can't reach 8.8.8.8); nil = auto-detect.
-         (agent (make-ice :local-ip (uiop:getenv "ICE_LOCAL_IP")))
-         (conn (webrtc-dtls-setup agent :remote-fingerprint (sdp-fingerprint offer)))
-         ;; GATHER_SRFLX=1 → advertise our public (STUN) address for NAT traversal; setting
-         ;; TURN_SERVER/TURN_USER/TURN_PASS additionally Allocates a TURN relay candidate, which
-         ;; covers symmetric NAT. Both add a round-trip; leave off for LAN.
-         (answer (ice-answer agent offer :fingerprint (dtls-conn-fingerprint conn)
-                             :gather-srflx (and (uiop:getenv "GATHER_SRFLX") t)
-                             :gather-relay (and (uiop:getenv "TURN_SERVER") t))))
-    (ice-serve agent)
-    ;; full-agent checks (punch our NAT mapping open toward the peer) when NAT traversal is on
-    (when (uiop:getenv "GATHER_SRFLX") (ice-start-checks agent))
-    (bt:make-thread (lambda () (run-session conn)) :name "webrtc-session")
-    answer))
+  (multiple-value-bind (i ok) (cl-transport.chan:chan-receive *free-replies* :timeout 10)
+    (unless ok (error "gateway: too many offers at once"))
+    (let ((reply (svref *replies* i)))
+      (unwind-protect
+           (progn
+             (cl-transport.chan:chan-drain reply)
+             (sb-thread:make-thread #'session-main :name "webrtc-session"
+                                    :arguments (list (cl-transport.http-server:request-body-string request)
+                                                     reply))
+             (multiple-value-bind (answer got) (cl-transport.chan:chan-receive reply :timeout 60)
+               (cond ((not got) (error "gateway: no answer within 60 s"))
+                     ((stringp answer) answer)
+                     (t (error "gateway: ~a" (second answer))))))
+        (cl-transport.chan:chan-send *free-replies* i :timeout 1)))))
 
 (defun handle-index (request)
   (setf (cl-transport.http-server:reply-content-type request) "text/html") *index*)
 
 (defun handle-drop (request)
-  "GET /drop?rate=R — set *SCTP-DROP-RATE* (a dev knob for simulating outbound loss)."
+  "GET /drop?rate=R — set the outbound drop rate (a dev knob for simulating loss): *KNOBS*[0],
+which every session copies into its *SCTP-DROP-RATE* on its next pass."
   (setf (cl-transport.http-server:reply-content-type request) "text/plain")
   (let ((r (ignore-errors (let ((*read-eval* nil))
                             (read-from-string (cl-transport.http-server:query-param request "rate"))))))
     (when (realp r)
-      (setf (symbol-value (find-symbol "*SCTP-DROP-RATE*" :webrtc-data)) (float r 1d0))))
-  (format nil "drop-rate=~a~%" (symbol-value (find-symbol "*SCTP-DROP-RATE*" :webrtc-data))))
+      (setf (aref *knobs* 0) (max 0 (min 1000000 (round (* r 1000000)))))))
+  (format nil "drop-rate=~a~%" (drop-rate)))
 
 (defun handle-stats (request)
-  "GET /stats — the current session's SCTP transport stats as JSON."
+  "GET /stats — the latest session's SCTP transport stats as JSON."
   (setf (cl-transport.http-server:reply-content-type request) "application/json")
-  (if *last-assoc*
-      (format nil "{~{~a~^,~}}"
-              (loop for (k v) on (sctp-stats *last-assoc*) by #'cddr
-                    collect (format nil "\"~(~a~)\":~a"
-                                    k (cond ((null v) -1) ((symbolp v) (format nil "\"~(~a~)\"" v))
-                                            ((floatp v) (format nil "~,2f" v)) (t v)))))
-      "{}"))
+  (read-stats))
 
 (defvar *acceptor* nil
   "The running HTTP server (a CL-TRANSPORT.HTTP-SERVER:SERVER), or NIL.  The name is from
@@ -195,6 +277,13 @@
 
    The routes are THIS server's own, not a global dispatch table (hunchentoot's was one
    per image, so webrtc-data/transport's :webrtc EXPOSE in the same image replaced them)."
+  (unless *replies*
+    (setf *replies* (coerce (loop repeat +max-signals+
+                                  collect (cl-transport.chan:make-chan :capacity 65536))
+                            'simple-vector)
+          *free-replies* (cl-transport.chan:make-chan :capacity 4096))
+    (dotimes (i +max-signals+) (cl-transport.chan:chan-send *free-replies* i)))
+  (webrtc-identity)                     ; made here, once, where every session can read it
   (setf *acceptor*
         (cl-transport.http-server:start-server
          :host address :port port :name "gateway"
