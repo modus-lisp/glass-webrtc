@@ -12,13 +12,14 @@
 ;;;; the port closed.
 
 (require :asdf)
-(require :sb-posix)
-(defvar *no-desktop* (format nil "unix:~a/gw-http-test-no-desktop-~d.rfb"
-                             (or (sb-posix:getenv "TMPDIR") "/tmp") (sb-posix:getpid)))
-(sb-posix:setenv "GLASS_HOST" *no-desktop* 1)
+(asdf:initialize-source-registry)       ; modus's ASDF reads CL_SOURCE_REGISTRY only when asked
 (handler-bind ((warning #'muffle-warning))
   (let ((*standard-output* (make-broadcast-stream)))
     (asdf:load-system "glass-webrtc")))
+;; Set after loading, not through GLASS_HOST: no SB-POSIX:SETENV needed (modus has none).
+(defvar *no-desktop* (format nil "unix:~a/gw-http-test-no-desktop-~d.rfb"
+                             (or (uiop:getenv "TMPDIR") "/tmp") (random 1000000000 (make-random-state t))))
+(setf webrtc-data::*glass-host* *no-desktop*)
 
 (defpackage #:gw-http-test (:use #:cl) (:local-nicknames (#:wd #:webrtc-data)
                                                          (#:http #:cl-transport.http-server)))

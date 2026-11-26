@@ -168,7 +168,7 @@ menu strip) with a run of light-grey pixels at least 150 wide -- t/linkcond.py's
         (check "the device is stored (secret not printed) with the renewal the answer carried"
                (and (d:credential-device-pub cred) (d:credential-code-alive-p cred))
                (princ-to-string cred)))
-      (check "the route" t (wd::ice-route-label (wd:peer-agent (d:dial-peer dialled))))
+      (check "the route" t (getf (wd:peer-stats (d:dial-peer dialled)) :route))
       ;; 3
       (let* ((r (view dialled)) (fb (gc:remote-fb r)))
         (check "RFB is up over the data channel" (wait-until 20 (lambda () (gc:remote-connected-p r)))
@@ -241,7 +241,7 @@ menu strip) with a run of light-grey pixels at least 150 wide -- t/linkcond.py's
     ;; 9. through the TURN relay only, as a phone on a hard NAT connects
     (multiple-value-bind (dialled secs err) (dial :relay-only t :turn (let ((f (uiop:split-string (env "E2E_TURN"))))
                                                                        (list (first f) (second f) (third f))))
-      (let ((route (and dialled (first (wd::ice-agent-peer (wd:peer-agent (d:dial-peer dialled)))))))
+      (let ((route (and dialled (getf (wd:peer-stats (d:dial-peer dialled)) :route-kind))))
         (check "dialled through the TURN relay only" (member route '(:relay :relay-send))
                (if dialled (format nil "route ~(~a~), ~,2fs" route secs) err)))
       (when dialled
