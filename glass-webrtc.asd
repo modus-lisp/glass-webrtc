@@ -20,7 +20,7 @@ machine's home directory."
   ;; script and is invisible to anything that wants to know what this depends on.
   ;; webrtc-media for the VP8 encoder the video ladder drives — an undeclared
   ;; dependency until now, because a subdirectory loaded by path declares nothing.
-  :depends-on ("glass-webrtc/media" "cl-transport/http-server" "cl-transport/chan")
+  :depends-on ("glass-webrtc/media" "cl-transport/http-server" "bobbin")
   :serial t
   :components ((:file "gateway")))
 

@@ -23,7 +23,7 @@
   ;; The HTTP half is the org's own (it was hunchentoot, which brought cl+ssl, CFFI and
   ;; OpenSSL along for a server that never spoke TLS): no Quicklisp needed.
   (asdf:load-system "cl-transport/http-server")
-  (asdf:load-system "cl-transport/chan"))
+  (asdf:load-system "bobbin"))
 
 (in-package #:webrtc-data)
 
@@ -166,7 +166,7 @@ channel, and bridge it to glass once it opens -- every part of it on this thread
               ;; full-agent checks (punch our NAT mapping open toward the peer) when NAT traversal is on
               (when (uiop:getenv "GATHER_SRFLX") (ice-start-checks a))
               (setf answered t)
-              (cl-transport.chan:chan-send reply answer :timeout 5)
+              (bobbin:channel-send reply answer :timeout 5)
               (webrtc-dtls-run conn)
               (webrtc-serve-datachannel
                conn :duration 3600.0 :tick 0.005
@@ -206,7 +206,7 @@ channel, and bridge it to glass once it opens -- every part of it on this thread
                      (setf prev now t0 (get-internal-real-time)))))))
           (error (e)
             (unless answered
-              (ignore-errors (cl-transport.chan:chan-send reply (list :error (princ-to-string e))
+              (ignore-errors (bobbin:channel-send reply (list :error (princ-to-string e))
                                                           :timeout 1)))
             (format *error-output* "~&[gw] session error: ~a~%" e)))
       ;; cleanup: close the glass connection so glass's per-client thread exits too
@@ -223,20 +223,20 @@ channel, and bridge it to glass once it opens -- every part of it on this thread
 (defun handle-signal (request)
   "POST /signal: body is the browser's offer SDP; return our answer SDP."
   (setf (cl-transport.http-server:reply-content-type request) "application/sdp")
-  (multiple-value-bind (i ok) (cl-transport.chan:chan-receive *free-replies* :timeout 10)
+  (multiple-value-bind (i ok) (bobbin:channel-receive *free-replies* :timeout 10)
     (unless ok (error "gateway: too many offers at once"))
     (let ((reply (svref *replies* i)))
       (unwind-protect
            (progn
-             (cl-transport.chan:chan-drain reply)
+             (bobbin:channel-drain reply)
              (sb-thread:make-thread #'session-main :name "webrtc-session"
                                     :arguments (list (cl-transport.http-server:request-body-string request)
                                                      reply))
-             (multiple-value-bind (answer got) (cl-transport.chan:chan-receive reply :timeout 60)
+             (multiple-value-bind (answer got) (bobbin:channel-receive reply :timeout 60)
                (cond ((not got) (error "gateway: no answer within 60 s"))
                      ((stringp answer) answer)
                      (t (error "gateway: ~a" (second answer))))))
-        (cl-transport.chan:chan-send *free-replies* i :timeout 1)))))
+        (bobbin:channel-send *free-replies* i :timeout 1)))))
 
 (defun handle-index (request)
   (setf (cl-transport.http-server:reply-content-type request) "text/html") *index*)
@@ -279,10 +279,10 @@ which every session copies into its *SCTP-DROP-RATE* on its next pass."
    per image, so webrtc-data/transport's :webrtc EXPOSE in the same image replaced them)."
   (unless *replies*
     (setf *replies* (coerce (loop repeat +max-signals+
-                                  collect (cl-transport.chan:make-chan :capacity 65536))
+                                  collect (bobbin:make-channel :capacity 65536))
                             'simple-vector)
-          *free-replies* (cl-transport.chan:make-chan :capacity 4096))
-    (dotimes (i +max-signals+) (cl-transport.chan:chan-send *free-replies* i)))
+          *free-replies* (bobbin:make-channel :capacity 4096))
+    (dotimes (i +max-signals+) (bobbin:channel-send *free-replies* i)))
   (webrtc-identity)                     ; made here, once, where every session can read it
   (setf *acceptor*
         (cl-transport.http-server:start-server
